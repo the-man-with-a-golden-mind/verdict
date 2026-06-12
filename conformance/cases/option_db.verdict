@@ -1,0 +1,8 @@
+module Main exposing (main)
+
+main : Int
+main =
+  let id = dbInsert("users", { age = 30 }) in
+  let present = withDefault({ age = 0 }, dbGetOpt("users", id)).age in
+  let missing = match dbGetOpt("users", "no-such-id") { Some r -> 1000, None -> 12 } in
+  present + missing

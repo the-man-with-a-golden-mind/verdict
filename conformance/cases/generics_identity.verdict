@@ -1,0 +1,9 @@
+module Main exposing (main)
+
+identity : a -> a
+identity x =
+  x
+
+main : Int
+main =
+  identity(41) + identity(1)

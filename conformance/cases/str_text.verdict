@@ -1,0 +1,8 @@
+module Main exposing (main)
+
+-- str.* string results (probes VString encoding parity): upper, replace, concat, trim.
+main : String
+main =
+  let up = toUpper("btcusdt") in
+  let renamed = replace(up, "USDT", "-USD") in
+  trim(strConcat("  ", strConcat(renamed, "  ")))

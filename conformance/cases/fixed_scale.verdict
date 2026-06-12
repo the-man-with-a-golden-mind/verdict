@@ -1,0 +1,5 @@
+module Main exposing (main)
+
+main : Fixed
+main =
+  1.50 + 0.25

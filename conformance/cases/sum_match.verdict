@@ -1,0 +1,14 @@
+module Main exposing (main)
+
+type Box a = Full a | Empty
+
+score : Box Int -> Int
+score b =
+  match b {
+    Full n -> n + 1,
+    Empty -> 0
+  }
+
+main : Int
+main =
+  score(Full(41))

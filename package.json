@@ -1,0 +1,20 @@
+{
+  "name": "verdict",
+  "version": "0.1.0",
+  "description": "Verdict — a small Elm-like language that compiles to FinVM bytecode (JSON). Runs on Node and in the browser.",
+  "type": "module",
+  "bin": {
+    "verdictc": "bin/verdictc.mjs"
+  },
+  "scripts": {
+    "build": "spago build",
+    "test": "spago build && node --input-type=module -e \"import('./output/Test.Main/index.js').then(m => m.main())\"",
+    "bundle": "npx --yes esbuild output/Verdict.Compiler/index.js --bundle --format=esm --outfile=web/verdict.mjs && npx --yes esbuild output/Verdict.Compiler/index.js --bundle --format=iife --global-name=Verdict --outfile=web/verdict.global.js",
+    "build:web": "spago build && npm run bundle",
+    "compile": "node bin/verdictc.mjs",
+    "demo": "npm run build:web && node web/serve.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.21.0"
+  }
+}

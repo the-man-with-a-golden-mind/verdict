@@ -1,0 +1,6 @@
+module Main exposing (main)
+
+main : Int
+main =
+  let row = { age = 30, score = 12 } in
+  row.age + row.score

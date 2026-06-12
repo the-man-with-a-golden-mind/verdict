@@ -1,0 +1,15 @@
+module Main exposing (main)
+
+doubler : Int -> Unit
+doubler s =
+  let req = recv() in
+  let _ = send(req.reply_to, { value = req.n * 2 }) in
+  doubler(s)
+
+main : Int
+main =
+  let me = self() in
+  let srv = spawn(doubler, 0) in
+  let _ = send(srv, { reply_to = me, n = 21 }) in
+  let reply = recv() in
+  reply.value

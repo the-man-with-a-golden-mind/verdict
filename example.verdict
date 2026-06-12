@@ -1,0 +1,68 @@
+module Main exposing (main)
+
+-- A tiny scoring pipeline. It demonstrates generic data types, pattern
+-- matching, records, lists, indexing sugar, higher-order prelude functions,
+-- integer modulo, Option, and a tail-recursive helper.
+
+type Audit a =
+  | Audited a Int
+  | Skipped
+
+keepPositive : { score : Int, weight : Int } -> Bool
+keepPositive row =
+  row.score > 0
+
+weighted : { score : Int, weight : Int } -> Int
+weighted row =
+  row.score * row.weight
+
+add : Int -> Int -> Int
+add a b =
+  a + b
+
+review : { score : Int, weight : Int } -> Audit { score : Int, weight : Int }
+review row =
+  if mod(row.score, 2) == 0 then Audited(row, row.score * row.weight)
+  else Skipped
+
+reviewPoints : Audit { score : Int, weight : Int } -> Int
+reviewPoints audit =
+  match audit {
+    Audited row points -> points + row.score,
+    Skipped -> 0
+  }
+
+safeAt : List { score : Int, weight : Int } -> Int -> Option { score : Int, weight : Int }
+safeAt xs i =
+  if i < length(xs) then Some(xs[i])
+  else None
+
+optionScore : Option { score : Int, weight : Int } -> Int
+optionScore opt =
+  match opt {
+    Some row -> row.score,
+    None -> 0
+  }
+
+sumTo : Int -> Int -> Int
+sumTo acc n =
+  switch n {
+    0 -> acc,
+    _ -> sumTo(acc + n, n - 1)
+  }
+
+main : Int
+main =
+  let rows = [
+    { score = 5, weight = 2 },
+    { score = -1, weight = 9 },
+    { score = 4, weight = 3 },
+    { score = 6, weight = 1 }
+  ] in
+  let positives = filter(keepPositive, rows) in
+  let weightedScores = map(weighted, positives) in
+  let total = foldl(add, 0, weightedScores) in
+  let firstScore = optionScore(safeAt(positives, 0)) in
+  let parity = mod(total, 7) in
+  let inspected = reviewPoints(review(rows[2])) in
+  total + firstScore + parity + inspected + sumTo(0, 4)

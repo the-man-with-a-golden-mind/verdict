@@ -1,0 +1,9 @@
+module Main exposing (main)
+
+-- str.* numeric results: length, indexOf, and parseInt should match FinVM.
+main : Int
+main =
+  let n = strLength("hello world") in
+  let i = indexOf("hello world", "world") in
+  let p = withDefault(0, parseInt("42")) in
+  n + i + p

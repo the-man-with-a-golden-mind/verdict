@@ -1,0 +1,12 @@
+module Main exposing (main)
+
+sumTo : Int -> Int -> Int
+sumTo acc n =
+  switch n {
+    0 -> acc,
+    _ -> sumTo(acc + n, n - 1)
+  }
+
+main : Int
+main =
+  sumTo(0, 20000)

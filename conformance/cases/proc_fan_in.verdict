@@ -1,0 +1,26 @@
+module Main exposing (main)
+
+waitFor : String -> Int
+waitFor key =
+  let v = cacheGet("proc", key) in
+  if v == unit then let _ = yield() in waitFor(key) else v
+
+collector : Int -> Int -> Unit
+collector remaining acc =
+  switch remaining {
+    0 -> let _ = cacheSet("proc", "sum", acc) in unit,
+    _ -> let msg = recv() in collector(remaining - 1, acc + msg.value)
+  }
+
+worker : Pid -> Int -> Unit
+worker boss n =
+  let _ = send(boss, { value = n * n }) in
+  unit
+
+main : Int
+main =
+  let boss = spawn(collector, 3, 0) in
+  let _ = spawn(worker, boss, 1) in
+  let _ = spawn(worker, boss, 2) in
+  let _ = spawn(worker, boss, 3) in
+  waitFor("sum")

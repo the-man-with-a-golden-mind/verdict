@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Verdict → FinVM playground</title>
+  <style>
+    :root { color-scheme: light dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      background: #0e1116; color: #e6e6e6;
+    }
+    header { padding: 14px 20px; border-bottom: 1px solid #232a33; }
+    header h1 { margin: 0; font-size: 16px; }
+    header p { margin: 4px 0 0; color: #8b97a5; font-size: 12px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; height: calc(100vh - 64px); background: #232a33; }
+    .pane { display: flex; flex-direction: column; background: #0e1116; min-width: 0; }
+    .pane > label { padding: 8px 14px; color: #8b97a5; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    textarea, pre {
+      flex: 1; margin: 0; padding: 14px; border: 0; outline: 0; resize: none;
+      background: #0e1116; color: #e6e6e6; font: inherit; tab-size: 2;
+      overflow: auto; white-space: pre;
+    }
+    textarea { border-top: 1px solid #232a33; }
+    pre { border-top: 1px solid #232a33; }
+    pre.error { color: #ff6b6b; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Verdict → FinVM</h1>
+    <p>Compiles in your browser. The same <code>Verdict.Compiler</code> module also runs on Node.</p>
+  </header>
+  <main>
+    <div class="pane">
+      <label for="src">Verdict source</label>
+      <textarea id="src" spellcheck="false">module Main exposing (main)
+
+square : Int -> Int
+square x =
+  x * x
+
+main : Int
+main =
+  square(7) + 40 / 4 - 2 * 100000000000000000000
+</textarea>
+    </div>
+    <div class="pane">
+      <label>FinVM program (JSON)</label>
+      <pre id="out"></pre>
+    </div>
+  </main>
+
+  <script type="module">
+    import { compileJS } from './verdict.mjs';
+
+    const src = document.getElementById('src');
+    const out = document.getElementById('out');
+
+    function run() {
+      const result = compileJS(src.value);
+      if (result.ok) {
+        out.className = '';
+        out.textContent = result.output;
+      } else {
+        out.className = 'error';
+        out.textContent = result.error;
+      }
+    }
+
+    src.addEventListener('input', run);
+    run();
+  </script>
+</body>
+</html>
