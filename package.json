@@ -1,10 +1,23 @@
 {
-  "name": "verdict",
+  "name": "@v_m_v/verdict",
   "version": "1.0.8",
   "description": "Verdict — a small Elm-like language that compiles to FinVM bytecode (JSON). Runs on Node and in the browser.",
   "type": "module",
   "bin": {
-    "verdictc": "bin/verdictc.mjs"
+    "verdictc": "bin/verdictc.mjs",
+    "verdictrun": "bin/verdictrun.mjs"
+  },
+  "files": [
+    "bin",
+    "docs",
+    "output",
+    "web/verdict.mjs",
+    "web/verdict.global.js",
+    "README.md",
+    "language.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "spago build",
