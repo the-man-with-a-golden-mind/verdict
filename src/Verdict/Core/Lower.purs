@@ -12,6 +12,7 @@ import Data.Foldable (traverse_)
 import Data.Map (Map)
 import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
+import Data.String.CodeUnits as SCU
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Verdict.Core.MIR (MFunc, MInstr(..), VReg, Label)
@@ -20,6 +21,8 @@ import Verdict.Syntax.AST (BinOp(..), CmpOp(..), Ctor, Decl(..), Expr(..), Lit(.
 type LowerState =
   { nextReg :: VReg
   , nextLabel :: Int
+  , nextEffect :: Int
+  , currentFunc :: Name
   , instrs :: Array MInstr
   }
 
@@ -42,6 +45,12 @@ freshLabel pfx = do
 
 emit :: MInstr -> L Unit
 emit i = modify_ \s -> s { instrs = Array.snoc s.instrs i }
+
+freshEffectId :: L Int
+freshEffectId = do
+  s <- get
+  modify_ _ { nextEffect = s.nextEffect + 1 }
+  pure s.nextEffect
 
 --------------------------------------------------------------------------------
 -- Expressions (value position): returns the vreg holding the result.
@@ -177,9 +186,11 @@ lowerExpr ctors env = case _ of
 
   EBuiltin name args -> do
     rs <- traverse (lowerExpr ctors env) args
-    r <- freshReg
-    emit (MBuiltin r name rs)
-    pure r
+    if isEffectfulBuiltin name then lowerEffectBuiltin name rs
+    else do
+      r <- freshReg
+      emit (MBuiltin r name rs)
+      pure r
 
   EList xs -> do
     rs <- traverse (lowerExpr ctors env) xs
@@ -231,6 +242,91 @@ lowerExpr ctors env = case _ of
     emit (MRecordSet r r "$tag" tag)
     traverse_ (\(Tuple ix arg) -> emit (MRecordSet r r ("$" <> show ix) arg)) (Array.mapWithIndex Tuple args)
     pure r
+
+lowerEffectBuiltin :: String -> Array VReg -> L VReg
+lowerEffectBuiltin bid args = do
+  effectId <- freshEffectId
+  s <- get
+  let key = effectResultKey s.currentFunc effectId
+  payload <- effectPayload key bid args
+  intent <- freshReg
+  emit (MEffectNew intent (effectType bid) payload)
+  emit (MEffectRequest intent)
+  r <- freshReg
+  emit (MLoadInput r key)
+  pure r
+
+effectResultKey :: Name -> Int -> String
+effectResultKey fn ix = "__effect.result." <> fn <> "." <> show ix
+
+effectType :: String -> String
+effectType = SCU.takeWhile (_ /= '@')
+
+isEffectfulBuiltin :: String -> Boolean
+isEffectfulBuiltin bid =
+  case namespace bid of
+    "http" -> true
+    "db" -> true
+    "cache" -> true
+    "sys" -> true
+    "ws" -> true
+    "time" -> true
+    "random" -> true
+    _ -> false
+
+namespace :: String -> String
+namespace = SCU.takeWhile (_ /= '.')
+
+effectPayload :: String -> String -> Array VReg -> L VReg
+effectPayload key bid args = do
+  keyReg <- freshReg
+  emit (MLoad keyReg (LStr key))
+  case payloadFields bid args of
+    Just fields -> recordPayload (Tuple "key" keyReg `Array.cons` fields)
+    Nothing -> do
+      argsReg <- argsPayload args
+      recordPayload [ Tuple "key" keyReg, Tuple "args" argsReg ]
+
+payloadFields :: String -> Array VReg -> Maybe (Array (Tuple String VReg))
+payloadFields bid args = case bid, args of
+  "http.get@1", [ url ] -> Just [ Tuple "url" url ]
+  "http.post@1", [ url, body ] -> Just [ Tuple "url" url, Tuple "body" body ]
+  "db.insert@1", [ table, record ] -> Just [ Tuple "table" table, Tuple "record" record ]
+  "db.get@1", [ table, id ] -> Just [ Tuple "table" table, Tuple "id" id ]
+  "db.update@1", [ table, id, record ] -> Just [ Tuple "table" table, Tuple "id" id, Tuple "record" record ]
+  "db.delete@1", [ table, id ] -> Just [ Tuple "table" table, Tuple "id" id ]
+  "db.query@1", [ table, query, options ] -> Just [ Tuple "table" table, Tuple "query" query, Tuple "options" options ]
+  "db.createIndex@1", [ table, field ] -> Just [ Tuple "table" table, Tuple "field" field ]
+  "db.hash@1", [ table ] -> Just [ Tuple "table" table ]
+  "cache.set@1", [ ns, key, value ] -> Just [ Tuple "ns" ns, Tuple "cacheKey" key, Tuple "value" value ]
+  "cache.get@1", [ ns, key ] -> Just [ Tuple "ns" ns, Tuple "cacheKey" key ]
+  "cache.delete@1", [ ns, key ] -> Just [ Tuple "ns" ns, Tuple "cacheKey" key ]
+  "sys.log@1", [ message ] -> Just [ Tuple "message" message ]
+  "sys.cwd@1", [] -> Just []
+  "sys.readText@1", [ path ] -> Just [ Tuple "path" path ]
+  "sys.writeText@1", [ path, contents ] -> Just [ Tuple "path" path, Tuple "contents" contents ]
+  "sys.env@1", [ name ] -> Just [ Tuple "name" name ]
+  _, _ -> Nothing
+
+argsPayload :: Array VReg -> L VReg
+argsPayload args = case args of
+  [] -> do
+    r <- freshReg
+    emit (MLoad r LUnit)
+    pure r
+  [ one ] -> pure one
+  _ -> do
+    r <- freshReg
+    emit (MListNew r)
+    traverse_ (\arg -> emit (MListAppend r r arg)) args
+    pure r
+
+recordPayload :: Array (Tuple String VReg) -> L VReg
+recordPayload fields = do
+  r <- freshReg
+  emit (MRecordNew r)
+  traverse_ (\(Tuple name value) -> emit (MRecordSet r r name value)) fields
+  pure r
 
 -- | One switch arm: a literal arm compares the scrutinee and skips on miss; the
 -- | default arm always runs. Every arm writes the shared result register.
@@ -307,7 +403,7 @@ lowerDecl ctors isEntry (Decl d) =
         , isEntry
         }
   in
-    evalState build { nextReg: 0, nextLabel: 0, instrs: [] }
+    evalState build { nextReg: 0, nextLabel: 0, nextEffect: 0, currentFunc: d.name, instrs: [] }
 
 lowerModule :: Module -> { funcs :: Array MFunc, entry :: Name }
 lowerModule (Module _ typeDecls decls) =

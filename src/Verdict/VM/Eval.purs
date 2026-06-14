@@ -317,6 +317,16 @@ runProcess prog pid frame0 = tailRecM loop frame0
         argsV <- traverseR regs as
         res <- callBuiltin bid argsV
         next (set regs d res)
+      LoadInput _ _ ->
+        err "LOAD_INPUT is not supported by the reference VM"
+      EffectNew _ _ _ ->
+        err "EFFECT_NEW is not supported by the reference VM"
+      EffectRequest _ ->
+        err "EFFECT_REQUEST is not supported by the reference VM"
+      EffectBatchNew _ ->
+        err "EFFECT_BATCH_NEW is not supported by the reference VM"
+      EffectBatchAppend _ _ _ ->
+        err "EFFECT_BATCH_APPEND is not supported by the reference VM"
       Spawn d fid as -> do
         argsV <- traverseR regs as
         f2 <- lookupFn fid

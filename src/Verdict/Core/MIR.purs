@@ -29,6 +29,11 @@ data MInstr
   -- | caller). Emitted by the tail-call peephole; maps to FinVM `TAIL_CALL`.
   | MTailCall Name (Array VReg)
   | MBuiltin VReg String (Array VReg)
+  | MLoadInput VReg String
+  | MEffectNew VReg String VReg
+  | MEffectRequest VReg
+  | MEffectBatchNew VReg
+  | MEffectBatchAppend VReg VReg VReg
   | MRecordNew VReg
   | MRecordSet VReg VReg Name VReg
   | MRecordGet VReg VReg Name
@@ -63,6 +68,10 @@ defOf = case _ of
   MRecv d -> Just d
   MSelf d -> Just d
   MBuiltin d _ _ -> Just d
+  MLoadInput d _ -> Just d
+  MEffectNew d _ _ -> Just d
+  MEffectBatchNew d -> Just d
+  MEffectBatchAppend d _ _ -> Just d
   MRecordNew d -> Just d
   MRecordSet d _ _ _ -> Just d
   MRecordGet d _ _ -> Just d
@@ -83,6 +92,9 @@ usesOf = case _ of
   MSend p m -> [ p, m ]
   MTailCall _ args -> args
   MBuiltin _ _ args -> args
+  MEffectNew _ _ payload -> [ payload ]
+  MEffectRequest intent -> [ intent ]
+  MEffectBatchAppend _ batch effect -> [ batch, effect ]
   MRecordSet _ r _ v -> [ r, v ]
   MRecordGet _ r _ -> [ r ]
   MListAppend _ l v -> [ l, v ]
@@ -123,6 +135,11 @@ mapVRegs f = case _ of
   MSelf d -> MSelf (f d)
   MTailCall n args -> MTailCall n (map f args)
   MBuiltin d n args -> MBuiltin (f d) n (map f args)
+  MLoadInput d path -> MLoadInput (f d) path
+  MEffectNew d n payload -> MEffectNew (f d) n (f payload)
+  MEffectRequest intent -> MEffectRequest (f intent)
+  MEffectBatchNew d -> MEffectBatchNew (f d)
+  MEffectBatchAppend d batch effect -> MEffectBatchAppend (f d) (f batch) (f effect)
   MRecordNew d -> MRecordNew (f d)
   MRecordSet d r fld v -> MRecordSet (f d) (f r) fld (f v)
   MRecordGet d r fld -> MRecordGet (f d) (f r) fld

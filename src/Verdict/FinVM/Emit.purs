@@ -89,6 +89,11 @@ convInstr = case _ of
   MSelf d -> pure (Self d)
   MTailCall n args -> pure (TailCall n args)
   MBuiltin d n args -> pure (CallBuiltin d n args)
+  MLoadInput d path -> pure (LoadInput d path)
+  MEffectNew d typ payload -> pure (EffectNew d typ payload)
+  MEffectRequest intent -> pure (EffectRequest intent)
+  MEffectBatchNew d -> pure (EffectBatchNew d)
+  MEffectBatchAppend d batch effect -> pure (EffectBatchAppend d batch effect)
   MRecordNew d -> pure (RecordNew d)
   MRecordSet d r fld v -> pure (RecordSet d r fld v)
   MRecordGet d r fld -> pure (RecordGet d r fld)
@@ -136,12 +141,13 @@ assemble funcs entry =
     , limits: { maxSteps: 100000000 }
     }
 
--- | Capabilities are the namespaces of the builtins actually invoked
--- | (`"db.insert@1"` → `"db"`), so a program declares exactly the host powers it
--- | uses (db / cache / bigint / logic).
+-- | Capabilities are the namespaces of the builtins/effects actually invoked
+-- | (`"db.insert@1"` / `"db.insert"` -> `"db"`), so a program declares exactly
+-- | the host powers it uses (db / cache / bigint / logic / http / sys).
 inferCapabilities :: Array EmitFunc -> Array String
 inferCapabilities funcs =
   Array.nub (Array.sort (Array.mapMaybe ns (Array.concatMap _.body funcs)))
   where
   ns (MBuiltin _ bid _) = Just (SCU.takeWhile (_ /= '.') bid)
+  ns (MEffectNew _ typ _) = Just (SCU.takeWhile (_ /= '.') typ)
   ns _ = Nothing

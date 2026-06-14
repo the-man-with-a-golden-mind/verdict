@@ -45,6 +45,10 @@ hasNone src needles =
   let o = out src
   in sum (map (\n -> if contains (Pattern n) o then 1 else 0) needles) == 0
 
+hasEffectProtocol :: String -> String -> Boolean
+hasEffectProtocol src typ =
+  hasAll src [ "\"EFFECT_NEW\"", typ, "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ]
+
 isError :: String -> Boolean
 isError src = case compile src of
   Left _ -> true
@@ -604,18 +608,19 @@ main = do
 
   -- Standard library: HTTP / sys I/O / data processing / advanced math.
   log "  -- platform and data libraries --"
-  assert fails "httpGet status -> 200"
-    (evalsTo (m "main : Int\nmain = httpGet(\"https://example.test/data\").status") "200")
-  assert fails "httpPost body is deterministic in reference VM"
-    (evalsTo (m "main : Int\nmain = strLength(httpPost(\"https://example.test\", \"payload\").body)") "33")
+  assert fails "httpGet lowers to EFFECT_REQUEST + input result"
+    (hasEffectProtocol (m "main : Int\nmain = httpGet(\"https://example.test/data\").status") "http.get")
+  assert fails "httpPost lowers a record payload"
+    (hasEffectProtocol (m "main : Int\nmain = strLength(httpPost(\"https://example.test\", \"payload\").body)") "http.post"
+      && hasAll (m "main : Int\nmain = strLength(httpPost(\"https://example.test\", \"payload\").body)") [ "\"url\"", "\"body\"" ])
   assert fails "http program infers [http] capability"
     (capsOf (m "main : Int\nmain = httpGet(\"https://example.test\").status") == [ "http" ])
-  assert fails "sys write/read round-trip"
-    (evalsTo
+  assert fails "sys write/read lowers to ordered effect requests"
+    (hasAll
        (m "main : Int\nmain =\n  let _ = sysWriteText(\"/tmp/a.txt\", \"hello\") in\n  strLength(withDefault(\"\", sysReadText(\"/tmp/a.txt\")))")
-       "5")
-  assert fails "sysEnv present"
-    (evalsTo (m "main : Int\nmain = strLength(withDefault(\"\", sysEnv(\"VERDICT\")))") "1")
+       [ "sys.writeText", "sys.readText", "__effect.result.sysWriteText.0", "__effect.result.sysReadText.0" ])
+  assert fails "sysEnv lowers to EFFECT_REQUEST"
+    (hasEffectProtocol (m "main : Int\nmain = strLength(withDefault(\"\", sysEnv(\"VERDICT\")))") "sys.env")
   assert fails "sysCwd infers [sys] capability"
     (capsOf (m "main : String\nmain = sysCwd") == [ "sys" ])
   assert fails "sortInts orders bigint ints"
@@ -891,63 +896,40 @@ main = do
     (evalsTo (m "main : Int\nmain = builtin(\"bigint.modPow@1\", 4, 13, 497)") "445")
   assert fails "runs bigint.modInv builtin -> 4"
     (evalsTo (m "main : Int\nmain = builtin(\"bigint.modInv@1\", 3, 11)") "4")
-  -- DB round-trip: insert a record, read it back, project a field.
-  assert fails "runs db.insert + db.get round-trip -> 30"
-    (evalsTo
+  assert fails "direct db builtins lower to effects, not CALL_BUILTIN"
+    (hasAll
        (m "main : Int\nmain =\n  let id = builtin(\"db.insert@1\", \"users\", { age = 30 }) in\n  builtin(\"db.get@1\", \"users\", id).age")
-       "30")
+       [ "db.insert", "db.get", "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ]
+      && hasNone
+           (m "main : Int\nmain =\n  let id = builtin(\"db.insert@1\", \"users\", { age = 30 }) in\n  builtin(\"db.get@1\", \"users\", id).age")
+           [ "db.insert@1", "db.get@1" ])
 
   -- Standard library (prelude wrappers + tree-shaking + capabilities).
   log "  -- standard library --"
   let dbProg = m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  dbGet(\"users\", id).age"
-  assert fails "dbInsert/dbGet wrappers run -> 30" (evalsTo dbProg "30")
+  assert fails "dbInsert/dbGet wrappers lower to effects"
+    (hasAll dbProg [ "db.insert", "db.get", "__effect.result.dbInsert.0", "__effect.result.dbGet.0" ])
   assert fails "db program infers capabilities = [db]" (capsOf dbProg == [ "db" ])
-  assert fails "dbUpdate wrapper updates an existing row"
-    (evalsTo
-       (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  let _ = dbUpdate(\"users\", id, { age = 31 }) in\n  dbGet(\"users\", id).age")
-       "31")
-  assert fails "dbUpdate missing row is false"
-    (evalsTo (m "main : Int\nmain = if dbUpdate(\"users\", \"missing\", { age = 31 }) then 1 else 0") "0")
-  assert fails "dbDelete wrapper removes a row"
-    (evalsTo
-       (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  let _ = dbDelete(\"users\", id) in\n  if dbGet(\"users\", id) == unit then 1 else 0")
-       "1")
-  assert fails "dbQuery exact-match filter"
-    (evalsTo
-       (m "main : Int\nmain =\n  let _ = dbInsert(\"users\", { age = 30 }) in\n  let _ = dbInsert(\"users\", { age = 40 }) in\n  length(dbQuery(\"users\", { age = 30 }))")
-       "1")
-  assert fails "dbCreateIndex wrapper returns unit"
-    (evalsTo (m "main : Unit\nmain = dbCreateIndex(\"users\", \"age\")") "unit")
-  assert fails "dbHash wrapper returns table hash"
-    (evalsTo
-       (m "main : Bool\nmain =\n  let _ = dbInsert(\"users\", { age = 30 }) in\n  strContains(dbHash(\"users\"), \"age=30\")")
-       "true")
-  assert fails "cacheSet/cacheGet round-trip"
-    (evalsTo
+  assert fails "dbUpdate wrapper lowers to db.update intent"
+    (hasEffectProtocol (m "main : Int\nmain = if dbUpdate(\"users\", \"missing\", { age = 31 }) then 1 else 0") "db.update")
+  assert fails "dbDelete wrapper lowers to db.delete intent"
+    (hasEffectProtocol (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  let _ = dbDelete(\"users\", id) in\n  if dbGet(\"users\", id) == unit then 1 else 0") "db.delete")
+  assert fails "dbQuery wrapper lowers to db.query intent"
+    (hasEffectProtocol (m "main : Int\nmain = length(dbQuery(\"users\", { age = 30 }))") "db.query")
+  assert fails "dbCreateIndex wrapper lowers to db.createIndex intent"
+    (hasEffectProtocol (m "main : Unit\nmain = dbCreateIndex(\"users\", \"age\")") "db.createIndex")
+  assert fails "dbHash wrapper lowers to db.hash intent"
+    (hasEffectProtocol (m "main : Bool\nmain = strContains(dbHash(\"users\"), \"age=30\")") "db.hash")
+  assert fails "cacheSet/cacheGet lower to cache effects"
+    (hasAll
        (m "main : Int\nmain =\n  let _ = cacheSet(\"ns\", \"k\", { value = 42 }) in\n  cacheGet(\"ns\", \"k\").value")
-       "42")
-  assert fails "cacheDelete removes a value"
-    (evalsTo
-       (m "main : Int\nmain =\n  let _ = cacheSet(\"ns\", \"k\", { value = 42 }) in\n  let _ = cacheDelete(\"ns\", \"k\") in\n  if cacheGet(\"ns\", \"k\") == unit then 1 else 0")
-       "1")
-  assert fails "sysLog returns unit"
-    (evalsTo (m "main : Unit\nmain = sysLog(\"hello\")") "unit")
-  assert fails "dbGetOpt + withDefault returns present row -> 30"
-    (evalsTo
-       (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  withDefault({ age = 0 }, dbGetOpt(\"users\", id)).age")
-       "30")
-  assert fails "dbGetOpt missing branch runs -> 0"
-    (evalsTo
-       (m "main : Int\nmain = match dbGetOpt(\"users\", \"no-such-id\") { Some r -> 1, None -> 0 }")
-       "0")
-  assert fails "isSome true for present db row"
-    (evalsTo
-       (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  if isSome(dbGetOpt(\"users\", id)) then 1 else 0")
-       "1")
-  assert fails "isSome false for missing db row"
-    (evalsTo
-       (m "main : Int\nmain = if isSome(dbGetOpt(\"users\", \"no-such-id\")) then 1 else 0")
-       "0")
+       [ "cache.set", "cache.get", "__effect.result.cacheSet.0", "__effect.result.cacheGet.0" ])
+  assert fails "cacheDelete lowers to cache.delete intent"
+    (hasEffectProtocol (m "main : Int\nmain = if cacheDelete(\"ns\", \"k\") then 1 else 0") "cache.delete")
+  assert fails "sysLog lowers to sys.log intent"
+    (hasEffectProtocol (m "main : Unit\nmain = sysLog(\"hello\")") "sys.log")
+  assert fails "dbGetOpt uses db.get effect result"
+    (hasEffectProtocol (m "main : Int\nmain = match dbGetOpt(\"users\", \"no-such-id\") { Some r -> 1, None -> 0 }") "db.get")
   assert fails "user can match the generic prelude Option type"
     (evalsTo (m "main : Int\nmain = match Some(1) { Some v -> v, None -> 0 }") "1")
 
@@ -989,26 +971,25 @@ main = do
   fanInExample <- readExample "fan_in"
   assert fails "examples/request_reply.verdict runs -> 42"
     (evalsTo requestReplyExample "42")
-  assert fails "examples/fan_in.verdict runs -> 14"
-    (evalsTo fanInExample "14")
+  assert fails "examples/fan_in.verdict compiles cache rendezvous as effects"
+    (hasAll fanInExample [ "cache.get", "cache.set", "\"EFFECT_REQUEST\"" ])
   assert fails "example programs emit process opcodes"
     (hasAll requestReplyExample [ "\"PROC_SELF\"", "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"" ]
       && hasAll fanInExample [ "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"", "\"PROC_YIELD\"" ])
   let procPass = m
-        ( "waitFor : String -> Int\n"
-            <> "waitFor key =\n"
-            <> "  let v = cacheGet(\"proc\", key) in\n"
-            <> "  if v == unit then let _ = yield() in waitFor(key) else v\n"
-            <> "worker : Unit\n"
-            <> "worker =\n"
+        ( "worker : Pid -> Unit\n"
+            <> "worker replyTo =\n"
             <> "  let msg = recv() in\n"
-            <> "  let _ = cacheSet(\"proc\", \"value\", msg.value) in\n"
+            <> "  let _ = send(replyTo, { value = msg.value }) in\n"
             <> "  unit\n"
             <> "main : Int\n"
             <> "main =\n"
-            <> "  let p = spawn(worker) in\n"
+            <> "  let me = self() in\n"
+            <> "  let p = spawn(worker, me) in\n"
             <> "  let _ = send(p, { value = 37 }) in\n"
-            <> "  waitFor(\"value\")"
+            <> "  let _ = yield() in\n"
+            <> "  let reply = recv() in\n"
+            <> "  reply.value"
         )
   assert fails "spawn/send/recv/yield pass a record between processes -> 37"
     (evalsTo procPass "37")
@@ -1049,27 +1030,21 @@ main = do
   assert fails "one-shot worker replies with requested field -> 19"
     (evalsTo oneShotReply "19")
   let fanIn = m
-        ( "waitFor : String -> Int\n"
-            <> "waitFor key =\n"
-            <> "  let v = cacheGet(\"proc\", key) in\n"
-            <> "  if v == unit then let _ = yield() in waitFor(key) else v\n"
-            <> "collector : Int -> Int -> Unit\n"
-            <> "collector remaining acc =\n"
-            <> "  switch remaining {\n"
-            <> "    0 -> let _ = cacheSet(\"proc\", \"sum\", acc) in unit,\n"
-            <> "    _ -> let msg = recv() in collector(remaining - 1, acc + msg.value)\n"
-            <> "  }\n"
-            <> "worker : Pid -> Int -> Unit\n"
+        ( "worker : Pid -> Int -> Unit\n"
             <> "worker boss n =\n"
             <> "  let _ = send(boss, { value = n * n }) in\n"
             <> "  unit\n"
             <> "main : Int\n"
             <> "main =\n"
-            <> "  let boss = spawn(collector, 3, 0) in\n"
-            <> "  let _ = spawn(worker, boss, 1) in\n"
-            <> "  let _ = spawn(worker, boss, 2) in\n"
-            <> "  let _ = spawn(worker, boss, 3) in\n"
-            <> "  waitFor(\"sum\")"
+            <> "  let me = self() in\n"
+            <> "  let _ = spawn(worker, me, 1) in\n"
+            <> "  let _ = spawn(worker, me, 2) in\n"
+            <> "  let _ = spawn(worker, me, 3) in\n"
+            <> "  let _ = yield() in\n"
+            <> "  let a = recv() in\n"
+            <> "  let b = recv() in\n"
+            <> "  let c = recv() in\n"
+            <> "  a.value + b.value + c.value"
         )
   assert fails "fan-in workers sum through collector -> 14"
     (evalsTo fanIn "14")

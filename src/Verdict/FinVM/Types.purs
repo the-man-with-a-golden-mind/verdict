@@ -88,6 +88,11 @@ data InstructionVM
   | Call Int String (Array Int)
   | TailCall String (Array Int)
   | CallBuiltin Int String (Array Int)
+  | LoadInput Int String
+  | EffectNew Int String Int
+  | EffectRequest Int
+  | EffectBatchNew Int
+  | EffectBatchAppend Int Int Int
   | Spawn Int String (Array Int)
   | Send Int Int
   | Recv Int
@@ -132,6 +137,11 @@ instance encodeJsonInstructionVM :: EncodeJson InstructionVM where
     Call d fid args -> hetero "CALL" [ encodeJson d, encodeJson fid, encodeJson args ]
     TailCall fid args -> hetero "TAIL_CALL" [ encodeJson fid, encodeJson args ]
     CallBuiltin d bid args -> hetero "CALL_BUILTIN" [ encodeJson d, encodeJson bid, encodeJson args ]
+    LoadInput d path -> hetero "LOAD_INPUT" [ encodeJson d, encodeJson path ]
+    EffectNew d typ payload -> hetero "EFFECT_NEW" [ encodeJson d, encodeJson typ, encodeJson payload ]
+    EffectRequest intent -> ints "EFFECT_REQUEST" [ intent ]
+    EffectBatchNew d -> ints "EFFECT_BATCH_NEW" [ d ]
+    EffectBatchAppend d batch effect -> ints "EFFECT_BATCH_APPEND" [ d, batch, effect ]
     Spawn d fid args -> hetero "PROC_SPAWN" [ encodeJson d, encodeJson fid, encodeJson args ]
     Send p m -> ints "PROC_SEND" [ p, m ]
     Recv d -> ints "PROC_RECEIVE" [ d ]
