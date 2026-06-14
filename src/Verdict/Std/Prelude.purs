@@ -18,6 +18,8 @@ type Decoder a = Decoder Json
 
 type Encoder a = Encoder Json
 
+type ActorRef m = MkActorRef Pid
+
 -- Logic ----------------------------------------------------------------------
 
 and : Bool -> Bool -> Bool
@@ -634,6 +636,41 @@ okOr d r = match r { Ok v -> v, Err e -> d }
 
 mapResult : (a -> b) -> Result e a -> Result e b
 mapResult f r = match r { Ok v -> Ok(f(v)), Err e -> Err(e) }
+
+-- Actors ---------------------------------------------------------------------
+
+actorPid : ActorRef m -> Pid
+actorPid ref = match ref { MkActorRef pid -> pid }
+
+actorSelf : Unit -> ActorRef m
+actorSelf _ = MkActorRef(self())
+
+actorReceive : Unit -> m
+actorReceive _ = recv()
+
+actorSend : ActorRef m -> m -> Unit
+actorSend ref msg = send(actorPid(ref), msg)
+
+actorReply : ActorRef m -> m -> Unit
+actorReply ref msg = actorSend(ref, msg)
+
+actorCall : ActorRef m -> (Pid -> m) -> r
+actorCall ref make =
+  let me = self() in
+  let _ = actorSend(ref, make(me)) in
+  recv()
+
+actorContinue : s -> { stop : Bool, state : s }
+actorContinue state = { stop = False, state = state }
+
+actorStop : s -> { stop : Bool, state : s }
+actorStop state = { stop = True, state = state }
+
+actorLoop : (m -> s -> { stop : Bool, state : s }) -> s -> Unit
+actorLoop handle state =
+  let msg = actorReceive(unit) in
+  let next = handle(msg, state) in
+  if next.stop then unit else actorLoop(handle, next.state)
 
 -- Database (encrypted, indexed, persistent) ----------------------------------
 

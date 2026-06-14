@@ -124,6 +124,22 @@ lowerExpr ctors env = case _ of
       emit (MSpawn r "__invalid_spawn__" [])
       pure r
 
+  ECall "actorStart" args -> case Array.uncons args of
+    Just { head: fnRef, tail: rest } -> case stripAt fnRef of
+      EVar fnName -> do
+        rs <- traverse (lowerExpr ctors env) rest
+        pid <- freshReg
+        emit (MSpawn pid fnName rs)
+        lowerCtor "MkActorRef" [ pid ]
+      _ -> do
+        pid <- freshReg
+        emit (MSpawn pid "__invalid_spawn__" [])
+        lowerCtor "MkActorRef" [ pid ]
+    Nothing -> do
+      pid <- freshReg
+      emit (MSpawn pid "__invalid_spawn__" [])
+      lowerCtor "MkActorRef" [ pid ]
+
   ECall "send" [ pid, msg ] -> do
     rp <- lowerExpr ctors env pid
     rm <- lowerExpr ctors env msg

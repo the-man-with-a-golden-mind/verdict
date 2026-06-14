@@ -110,7 +110,7 @@ monomorphize mod =
       let re = rewriteCalls e
           rb = rewriteCalls body
       in { expr: ELet n re.expr rb.expr, requests: re.requests <> rb.requests }
-    ECall "spawn" args -> case Array.uncons args of
+    ECall f args | f == "spawn" || f == "actorStart" -> case Array.uncons args of
       Just { head: fnRef, tail: rest } -> case stripAt fnRef of
         EVar worker ->
           let
@@ -119,13 +119,13 @@ monomorphize mod =
               if Map.member worker infos then [ baseRequest worker ]
               else []
           in
-            { expr: ECall "spawn" (EVar worker `Array.cons` map _.expr rargs)
+            { expr: ECall f (EVar worker `Array.cons` map _.expr rargs)
             , requests: Array.concatMap _.requests rargs <> req
             }
         _ ->
           let rargs = map rewriteCalls args
-          in { expr: ECall "spawn" (map _.expr rargs), requests: Array.concatMap _.requests rargs }
-      Nothing -> { expr: ECall "spawn" [], requests: [] }
+          in { expr: ECall f (map _.expr rargs), requests: Array.concatMap _.requests rargs }
+      Nothing -> { expr: ECall f [], requests: [] }
     ECall f args ->
       if isHOF f then
         specializeCall f args

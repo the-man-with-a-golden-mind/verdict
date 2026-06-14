@@ -151,34 +151,55 @@ yet.) The prelude is still auto-injected on top of every module.
 Verdict exposes FinVM's process primitives as reserved intrinsic calls:
 
 - `spawn(fn, a, b, ...) : Pid`
+- `actorStart(fn, a, b, ...) : ActorRef msg`
 - `send(pid, msg) : Unit`
 - `recv() : Json`
 - `yield() : Unit`
 - `self() : Pid`
 
-An actor is just an ordinary top-level function running as a process. Actor
-services usually loop by tail-recursing after `recv()`, which stays stack-safe
-because Verdict emits `TAIL_CALL`.
+The raw primitives are still available, but the prelude also provides a small
+typed actor framework:
+
+- `ActorRef msg`: typed wrapper around an opaque `Pid`.
+- Actor handlers return `{ stop : Bool, state : state }`.
+- `actorContinue(state)` and `actorStop(state)` build handler results.
+- `actorStart(fn, args...)`: spawn a top-level actor function and wrap its pid.
+- `actorSend(ref, msg)`: send a typed message.
+- `actorCall(ref, makeMsg)`: request/reply helper; `makeMsg` receives `self()`.
+- `actorLoop(handle, state)`: receive, handle, and tail-recurse while continuing.
+- `actorSelf(unit)`, `actorPid(ref)`, `actorReceive(unit)`, `actorReply(ref,msg)`.
+
+An actor is still just an ordinary top-level function running as a process.
+Actor services usually delegate to `actorLoop`, which stays stack-safe because
+Verdict emits `TAIL_CALL`.
 
 ```elm
-doubler : Int -> Unit
-doubler s =
-  let req = recv() in
-  let _ = send(req.reply_to, { value = req.n * 2 }) in
-  doubler(s)
+type CounterMsg = Add Int | Get Pid
+
+counterHandle : CounterMsg -> Int -> { stop : Bool, state : Int }
+counterHandle msg state = match msg {
+  Add n -> actorContinue(state + n),
+  Get replyTo -> let _ = send(replyTo, { value = state }) in actorContinue(state)
+}
+
+counter : Int -> Unit
+counter state = actorLoop(counterHandle, state)
+
+makeGet : Pid -> CounterMsg
+makeGet replyTo = Get(replyTo)
 
 main : Int
 main =
-  let me = self() in
-  let srv = spawn(doubler, 0) in
-  let _ = send(srv, { reply_to = me, n = 21 }) in
-  let reply = recv() in
+  let c = actorStart(counter, 0) in
+  let _ = actorSend(c, Add(4)) in
+  let _ = actorSend(c, Add(5)) in
+  let reply = actorCall(c, makeGet) in
   reply.value
 ```
 
-`spawn` takes a bare top-level function name as its first argument; that name is
-checked against the function's arity and parameter types. Effects are sequenced
-with `let _ = effect in next`.
+`spawn` and `actorStart` take a bare top-level function name as their first
+argument; that name is checked against the function's arity and parameter types.
+Effects are sequenced with `let _ = effect in next`.
 
 Messages are records. Programs commonly tag them with a field such as `type`, or
 dispatch by record shape and field access. `recv()` returns `Json`, so message

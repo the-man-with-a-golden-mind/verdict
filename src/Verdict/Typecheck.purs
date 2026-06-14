@@ -189,6 +189,50 @@ listElem = case _ of
 
 inferIntrinsicCall :: TypeEnv -> Locals -> Name -> Array Expr -> Maybe (Either TypeError Ty)
 inferIntrinsicCall env locals f args = case f of
+  "actorStart" -> Just do
+    case Array.uncons args of
+      Nothing -> Left (CallArityMismatch "actorStart" 1 0)
+      Just { head: fnRef, tail: fnArgs } -> case stripAt fnRef of
+        EVar fnName -> case Map.lookup fnName env.globals of
+          Nothing -> Left SpawnRequiresFunction
+          Just sch -> do
+            let want = Array.length sch.params
+            when (want /= Array.length fnArgs) (Left (CallArityMismatch fnName want (Array.length fnArgs)))
+            _ <- instantiateCall env locals fnName sch.params fnArgs
+            Right (TData "ActorRef" [ TUnknown ])
+        _ -> Left SpawnRequiresFunction
+  "actorSelf" -> Just do
+    case args of
+      [ u ] -> do
+        tu <- infer env locals u
+        when (not (compatible TUnit tu)) (Left (Mismatch "actorSelf argument" TUnit tu))
+        Right (TData "ActorRef" [ TUnknown ])
+      _ -> Left (CallArityMismatch "actorSelf" 1 (Array.length args))
+  "actorReceive" -> Just do
+    case args of
+      [ u ] -> do
+        tu <- infer env locals u
+        when (not (compatible TUnit tu)) (Left (Mismatch "actorReceive argument" TUnit tu))
+        Right TUnknown
+      _ -> Left (CallArityMismatch "actorReceive" 1 (Array.length args))
+  "actorSend" -> Just do
+    case args of
+      [ _, _ ] -> do
+        _ <- instantiateCall env locals "actorSend" [ TData "ActorRef" [ TVar "m" ], TVar "m" ] args
+        Right TUnit
+      _ -> Left (CallArityMismatch "actorSend" 2 (Array.length args))
+  "actorReply" -> Just do
+    case args of
+      [ _, _ ] -> do
+        _ <- instantiateCall env locals "actorReply" [ TData "ActorRef" [ TVar "m" ], TVar "m" ] args
+        Right TUnit
+      _ -> Left (CallArityMismatch "actorReply" 2 (Array.length args))
+  "actorCall" -> Just do
+    case args of
+      [ _, _ ] -> do
+        _ <- instantiateCall env locals "actorCall" [ TData "ActorRef" [ TVar "m" ], TArrow TPid (TVar "m") ] args
+        Right TUnknown
+      _ -> Left (CallArityMismatch "actorCall" 2 (Array.length args))
   "spawn" -> Just do
     case Array.uncons args of
       Nothing -> Left (CallArityMismatch "spawn" 1 0)

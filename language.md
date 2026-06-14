@@ -112,6 +112,7 @@ Reserved intrinsic calls:
 - `get(xs, i) : a`
 - `append(xs, x) : List a`
 - `spawn(fn, args...) : Pid`
+- `actorStart(fn, args...) : ActorRef msg`
 - `send(pid, msg) : Unit`
 - `recv() : Json`
 - `yield() : Unit`
@@ -159,21 +160,38 @@ Implementation note: variants lower to records with private fields `"$tag"`,
 
 ## Concurrency
 
-Actors are ordinary top-level functions running as processes:
+Actors are ordinary top-level functions running as processes. The raw process
+intrinsics are available, and the prelude adds a typed actor layer:
+
+- `ActorRef msg` wraps a `Pid` with the message type it accepts.
+- Actor handlers return `{ stop : Bool, state : state }`.
+- `actorContinue(state)` and `actorStop(state)` build handler results.
+- `actorSend(ref, msg)` sends a typed message.
+- `actorCall(ref, makeMsg)` sends a request built from the caller pid and then
+  receives the reply.
+- `actorLoop(handle, state)` implements the standard receive/handle/recurse loop.
 
 ```verdict
-doubler : Int -> Unit
-doubler ignored =
-  let req = recv() in
-  let _ = send(req.reply_to, { value = req.n * 2 }) in
-  doubler(ignored)
+type CounterMsg = Add Int | Get Pid
+
+counterHandle : CounterMsg -> Int -> { stop : Bool, state : Int }
+counterHandle msg state = match msg {
+  Add n -> actorContinue(state + n),
+  Get replyTo -> let _ = send(replyTo, { value = state }) in actorContinue(state)
+}
+
+counter : Int -> Unit
+counter state = actorLoop(counterHandle, state)
+
+makeGet : Pid -> CounterMsg
+makeGet replyTo = Get(replyTo)
 
 main : Int
 main =
-  let me = self() in
-  let srv = spawn(doubler, 0) in
-  let _ = send(srv, { reply_to = me, n = 21 }) in
-  let reply = recv() in
+  let c = actorStart(counter, 0) in
+  let _ = actorSend(c, Add(4)) in
+  let _ = actorSend(c, Add(5)) in
+  let reply = actorCall(c, makeGet) in
   reply.value
 ```
 
@@ -405,4 +423,3 @@ Current MIR/source optimizations include:
 - For time-series decimals, use scaled integers.
 - `Json` is dynamic; field access on runtime JSON is checked by execution, not
   statically by a precise schema.
-

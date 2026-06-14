@@ -57,6 +57,7 @@ isIntrinsic = case _ of
   "append" -> true
   "mod" -> true
   "spawn" -> true
+  "actorStart" -> true
   "send" -> true
   "recv" -> true
   "yield" -> true

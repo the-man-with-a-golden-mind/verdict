@@ -1051,6 +1051,63 @@ main = do
   assert fails "process opcodes are emitted"
     (hasAll fanIn [ "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"", "\"PROC_YIELD\"" ])
 
+  log "  -- actor framework --"
+  let actorCounter = m
+        ( "type CounterMsg = Add Int | Get Pid\n"
+            <> "counterHandle : CounterMsg -> Int -> { stop : Bool, state : Int }\n"
+            <> "counterHandle msg state = match msg {\n"
+            <> "  Add n -> actorContinue(state + n),\n"
+            <> "  Get replyTo -> let _ = send(replyTo, { value = state }) in actorContinue(state)\n"
+            <> "}\n"
+            <> "counter : Int -> Unit\n"
+            <> "counter state = actorLoop(counterHandle, state)\n"
+            <> "makeGet : Pid -> CounterMsg\n"
+            <> "makeGet replyTo = Get(replyTo)\n"
+            <> "main : Int\n"
+            <> "main =\n"
+            <> "  let c = actorStart(counter, 0) in\n"
+            <> "  let _ = actorSend(c, Add(4)) in\n"
+            <> "  let _ = actorSend(c, Add(5)) in\n"
+            <> "  let reply = actorCall(c, makeGet) in\n"
+            <> "  reply.value"
+        )
+  assert fails "actorStart/actorSend/actorCall counter -> 9"
+    (evalsTo actorCounter "9")
+  assert fails "actor framework emits process opcodes"
+    (hasAll actorCounter [ "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"", "\"TAIL_CALL\"" ])
+  assert fails "actorStart keeps spawned actor and handler alive"
+    (hasFunction actorCounter "counter" && hasFunction actorCounter "counterHandle")
+  let actorStop = m
+        ( "type OnceMsg = Once Pid\n"
+            <> "onceHandle : OnceMsg -> Int -> { stop : Bool, state : Int }\n"
+            <> "onceHandle msg state = match msg {\n"
+            <> "  Once replyTo -> let _ = send(replyTo, { value = state }) in actorStop(state)\n"
+            <> "}\n"
+            <> "once : Int -> Unit\n"
+            <> "once state = actorLoop(onceHandle, state)\n"
+            <> "makeOnce : Pid -> OnceMsg\n"
+            <> "makeOnce replyTo = Once(replyTo)\n"
+            <> "main : Int\n"
+            <> "main =\n"
+            <> "  let a = actorStart(once, 7) in\n"
+            <> "  let reply = actorCall(a, makeOnce) in\n"
+            <> "  reply.value"
+        )
+  assert fails "actorLoop ActorStop exits after reply"
+    (evalsTo actorStop "7")
+  assert fails "actorSelf wraps current pid"
+    (evalsTo
+       (m "main : Unit\nmain =\n  let me = actorSelf(unit) in\n  actorReply(me, { ok = True })")
+       "unit")
+  assert fails "actorSend rejects wrong message type for typed ActorRef"
+    (isError
+       (m
+          ( "type Msg = Ping\n"
+              <> "bad : ActorRef Msg -> Unit\n"
+              <> "bad ref = actorSend(ref, \"not a message\")\n"
+              <> "main : Unit\nmain = bad(actorSelf(unit))"
+          )))
+
   n <- Ref.read fails
   if n == 0 then log "\nAll tests passed."
   else do
