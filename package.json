@@ -1,6 +1,6 @@
 {
   "name": "verdict",
-  "version": "0.1.0",
+  "version": "1.0.8",
   "description": "Verdict — a small Elm-like language that compiles to FinVM bytecode (JSON). Runs on Node and in the browser.",
   "type": "module",
   "bin": {
