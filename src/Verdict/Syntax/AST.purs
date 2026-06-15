@@ -119,7 +119,12 @@ data Expr
   | EIf Expr Expr Expr
   | ELet Name Expr Expr
   | ECall Name (Array Expr)
+  -- | `builtin("ns.fn@v", ...)` — a PURE host function (CALL_BUILTIN).
   | EBuiltin String (Array Expr)
+  -- | `effect("ns.fn@v", ...)` — an ASYNC host effect (EFFECT_AWAIT protocol), for
+  -- | any namespace. Lets Verdict programs add effectful FFI without a compiler or
+  -- | VM release: the host just registers a handler for the effect type.
+  | EEffect String (Array Expr)
   | EList (Array Expr)
   | ERecord (Array (Tuple Name Expr))
   | EField Expr Name

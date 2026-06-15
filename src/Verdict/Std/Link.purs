@@ -3,7 +3,7 @@
 -- | output lean and—because unused builtins are dropped—keeps inferred
 -- | `capabilities` precise. User declarations shadow prelude ones of the same
 -- | name.
-module Verdict.Std.Link (link) where
+module Verdict.Std.Link (link, linkAll) where
 
 import Prelude
 
@@ -31,6 +31,7 @@ refs ctors bound = case _ of
     let base = if Set.member f bound || Set.member f ctors || isIntrinsic f then Set.empty else Set.singleton f
     in base <> foldRefs bound args
   EBuiltin _ args -> foldRefs bound args
+  EEffect _ args -> foldRefs bound args
   EList xs -> foldRefs bound xs
   ERecord fields -> foldRefs bound (map snd fields)
   EField e _ -> refs ctors bound e
@@ -93,7 +94,16 @@ entryName decls =
       Nothing -> "main"
 
 link :: Module -> Module -> Module
-link userMod preludeMod =
+link = linkWith (\userDecls -> [ entryName userDecls ])
+
+-- | Like `link` but keeps EVERY user binding (and its prelude dependencies),
+-- | not just those reachable from the entry. Used by the editor to evaluate each
+-- | top-level binding independently.
+linkAll :: Module -> Module -> Module
+linkAll = linkWith (map declName)
+
+linkWith :: (Array Decl -> Array Name) -> Module -> Module -> Module
+linkWith roots userMod preludeMod =
   let
     userDecls = moduleDecls userMod
     userTypes = moduleTypes userMod
@@ -105,7 +115,7 @@ link userMod preludeMod =
     preludeExtra = Array.filter (\d -> not (Set.member (declName d) userNames)) (moduleDecls preludeMod)
     allDecls = userDecls <> preludeExtra
     declMap = Map.fromFoldable (map (\d -> Tuple (declName d) d) allDecls)
-    keep = reachable ctorSet declMap (entryName userDecls)
+    keep = Array.foldl (\acc n -> acc <> reachable ctorSet declMap n) Set.empty (roots userDecls)
     kept = Array.filter (\d -> Set.member (declName d) keep) allDecls
   in
     Module (moduleName userMod) allTypes kept

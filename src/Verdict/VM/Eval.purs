@@ -10,10 +10,12 @@ module Verdict.VM.Eval
   ( Value(..)
   , encodeValueJson
   , runProgram
+  , runProgramWithLogs
   ) where
 
 import Prelude
 
+import Control.Apply (lift2)
 import Control.Monad.Rec.Class (Step(..), tailRecM)
 import Control.Monad.State (StateT, get, put, runStateT)
 import Control.Monad.Trans.Class (lift)
@@ -106,8 +108,13 @@ fuel :: Int
 fuel = 5_000_000
 
 runProgram :: ProgramVM -> Either String Value
-runProgram prog = case FO.lookup prog.entrypoint prog.functions of
-  Nothing -> Left ("no entrypoint: " <> prog.entrypoint)
+runProgram = _.result <<< runProgramWithLogs
+
+-- | Like `runProgram` but also returns any `sys.log` output captured in the
+-- | world (logs are available on success; an aborted run returns no logs).
+runProgramWithLogs :: ProgramVM -> { result :: Either String Value, logs :: Array String }
+runProgramWithLogs prog = case FO.lookup prog.entrypoint prog.functions of
+  Nothing -> { result: Left ("no entrypoint: " <> prog.entrypoint), logs: [] }
   Just fn ->
     let
       p0 =
@@ -120,8 +127,9 @@ runProgram prog = case FO.lookup prog.entrypoint prog.functions of
         , ready = [ "main" ]
         , nextPid = 0
         }
-    in
-      map fst (runStateT (schedule prog) world0)
+    in case runStateT (schedule prog) world0 of
+      Left e -> { result: Left e, logs: [] }
+      Right (Tuple v w) -> { result: Right v, logs: w.logs }
 
 fromVM :: ValueVM -> Value
 fromVM = case _ of
@@ -319,10 +327,38 @@ runProcess prog pid frame0 = tailRecM loop frame0
         next (set regs d res)
       LoadInput _ _ ->
         err "LOAD_INPUT is not supported by the reference VM"
-      EffectNew _ _ _ ->
-        err "EFFECT_NEW is not supported by the reference VM"
       EffectRequest _ ->
         err "EFFECT_REQUEST is not supported by the reference VM"
+      -- Reference VM models the async effect protocol DETERMINISTICALLY: EFFECT_NEW
+      -- builds an intent value; EFFECT_AWAIT fulfils it synchronously through the
+      -- in-memory mocks (the real host driver does async I/O), then delivers the
+      -- result to this process's mailbox as { key, value } so the following
+      -- PROC_RECEIVE/VARIANT_PAYLOAD read it back. This is what the editor runs on.
+      EffectNew d typ payloadReg -> do
+        payloadV <- getR regs payloadReg
+        next (set regs d (VRecord [ Tuple "$effectType" (VString typ), Tuple "$payload" payloadV ]))
+      EffectAwait intentReg -> do
+        intentV <- getR regs intentReg
+        case intentV of
+          VRecord fs -> case lookupField "$effectType" fs, lookupField "$payload" fs of
+            Just (VString typ), Just payloadV -> do
+              result <- fulfillEffect typ payloadV
+              let keyV = case payloadV of
+                    VRecord pf -> fromMaybe VUnit (lookupField "key" pf)
+                    _ -> VUnit
+              let reply = VRecord [ Tuple "key" keyV, Tuple "value" result ]
+              w <- get
+              case Map.lookup pid w.procs of
+                Just proc -> put w { procs = Map.insert pid (proc { mailbox = Array.snoc proc.mailbox reply }) w.procs }
+                Nothing -> pure unit
+              next regs
+            _, _ -> err "EFFECT_AWAIT: malformed effect intent"
+          _ -> err "EFFECT_AWAIT requires an effect intent"
+      -- The reply payload is already the { key, value } record, so VARIANT_PAYLOAD
+      -- is the identity here (the reference VM does not box effect replies in a
+      -- VVariant the way FinVM does; the observable projection is the same).
+      VariantPayload d src ->
+        getR regs src >>= \v -> next (set regs d v)
       EffectBatchNew _ ->
         err "EFFECT_BATCH_NEW is not supported by the reference VM"
       EffectBatchAppend _ _ _ ->
@@ -457,6 +493,47 @@ recUpsert k v fs =
 lookupField :: String -> Array (Tuple String Value) -> Maybe Value
 lookupField k fs = map snd' (Array.find (\(Tuple n _) -> n == k) fs)
   where snd' (Tuple _ v) = v
+
+--------------------------------------------------------------------------------
+-- Effects: deterministic synchronous fulfilment for the reference VM. A curated
+-- effect is dispatched to the same in-memory mock as its builtin; an unknown
+-- (custom `effect("ns.fn@v", ...)`) namespace has no mock here and yields unit.
+-- The real host driver performs these as async I/O and journals them.
+--------------------------------------------------------------------------------
+
+fulfillEffect :: String -> Value -> Eval Value
+fulfillEffect typ payload = case knownEffectArgs typ payload of
+  Just args -> callBuiltin (typ <> "@1") args
+  Nothing -> pure VUnit
+
+-- | Positional args for a curated effect, read by name from its intent payload
+-- | (mirrors the lowering's payload field layout). `Nothing` => no reference mock.
+knownEffectArgs :: String -> Value -> Maybe (Array Value)
+knownEffectArgs typ payload = case payload of
+  VRecord fs ->
+    let f n = lookupField n fs
+    in case typ of
+      "http.get" -> mapM [ f "url" ]
+      "http.post" -> mapM [ f "url", f "body" ]
+      "sys.log" -> mapM [ f "message" ]
+      "sys.cwd" -> Just []
+      "sys.readText" -> mapM [ f "path" ]
+      "sys.writeText" -> mapM [ f "path", f "contents" ]
+      "sys.env" -> mapM [ f "name" ]
+      "db.insert" -> mapM [ f "table", f "record" ]
+      "db.get" -> mapM [ f "table", f "id" ]
+      "db.update" -> mapM [ f "table", f "id", f "record" ]
+      "db.delete" -> mapM [ f "table", f "id" ]
+      "db.query" -> mapM [ f "table", f "query", f "options" ]
+      "db.createIndex" -> mapM [ f "table", f "field" ]
+      "db.hash" -> mapM [ f "table" ]
+      "cache.set" -> mapM [ f "ns", f "cacheKey", f "value" ]
+      "cache.get" -> mapM [ f "ns", f "cacheKey" ]
+      "cache.delete" -> mapM [ f "ns", f "cacheKey" ]
+      _ -> Nothing
+  _ -> Nothing
+  where
+  mapM = Array.foldr (\m acc -> lift2 Array.cons m acc) (Just [])
 
 --------------------------------------------------------------------------------
 -- Builtins (deterministic in-memory world)

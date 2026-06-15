@@ -208,6 +208,11 @@ lowerExpr ctors env = case _ of
       emit (MBuiltin r name rs)
       pure r
 
+  -- `effect(...)` always lowers to the async effect protocol, for ANY namespace.
+  EEffect name args -> do
+    rs <- traverse (lowerExpr ctors env) args
+    lowerEffectBuiltin name rs
+
   EList xs -> do
     rs <- traverse (lowerExpr ctors env) xs
     r <- freshReg
@@ -259,6 +264,19 @@ lowerExpr ctors env = case _ of
     traverse_ (\(Tuple ix arg) -> emit (MRecordSet r r ("$" <> show ix) arg)) (Array.mapWithIndex Tuple args)
     pure r
 
+-- | Lower an effectful builtin to FinVM 1.1.0's ASYNC effect protocol. The
+-- | requesting process suspends on the intent's correlation `key` (EFFECT_AWAIT)
+-- | while OTHER processes keep running; the host driver fulfils the effect and
+-- | delivers the result to the mailbox as `VVariant "EffectReply" { key, value }`,
+-- | which we read with PROC_RECEIVE, unwrap (VARIANT_PAYLOAD), and project
+-- | (`value`). This composes with the actor framework: an actor awaiting I/O
+-- | yields to its siblings instead of blocking the whole VM.
+-- |
+-- | The key is unique per effect call SITE (`__effect.result.<fn>.<n>`). Effects
+-- | inside loops/recursion reuse the site key across iterations (a known limit);
+-- | and because PROC_RECEIVE is FIFO, an actor that has other messages queued
+-- | when it awaits will dequeue those first — fine for linear request/reply,
+-- | selective receive is a future refinement.
 lowerEffectBuiltin :: String -> Array VReg -> L VReg
 lowerEffectBuiltin bid args = do
   effectId <- freshEffectId
@@ -267,9 +285,13 @@ lowerEffectBuiltin bid args = do
   payload <- effectPayload key bid args
   intent <- freshReg
   emit (MEffectNew intent (effectType bid) payload)
-  emit (MEffectRequest intent)
+  emit (MEffectAwait intent)
+  reply <- freshReg
+  emit (MRecv reply)
+  replyRec <- freshReg
+  emit (MVariantPayload replyRec reply)
   r <- freshReg
-  emit (MLoadInput r key)
+  emit (MRecordGet r replyRec "value")
   pure r
 
 effectResultKey :: Name -> Int -> String

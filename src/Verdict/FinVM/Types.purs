@@ -93,6 +93,8 @@ data InstructionVM
   | EffectRequest Int
   | EffectBatchNew Int
   | EffectBatchAppend Int Int Int
+  | EffectAwait Int
+  | VariantPayload Int Int
   | Spawn Int String (Array Int)
   | Send Int Int
   | Recv Int
@@ -142,6 +144,8 @@ instance encodeJsonInstructionVM :: EncodeJson InstructionVM where
     EffectRequest intent -> ints "EFFECT_REQUEST" [ intent ]
     EffectBatchNew d -> ints "EFFECT_BATCH_NEW" [ d ]
     EffectBatchAppend d batch effect -> ints "EFFECT_BATCH_APPEND" [ d, batch, effect ]
+    EffectAwait intent -> ints "EFFECT_AWAIT" [ intent ]
+    VariantPayload d src -> ints "VARIANT_PAYLOAD" [ d, src ]
     Spawn d fid args -> hetero "PROC_SPAWN" [ encodeJson d, encodeJson fid, encodeJson args ]
     Send p m -> ints "PROC_SEND" [ p, m ]
     Recv d -> ints "PROC_RECEIVE" [ d ]

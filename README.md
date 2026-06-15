@@ -78,7 +78,8 @@ closures.
 | Let | `let x = e in body` | Expression-local binding. |
 | Records | `{ age = 30 }`, `row.age` | Structural records. |
 | Lists | `[1, 2, 3]`, `xs[i]` | Indexing desugars to `get(xs, i)`. |
-| Builtins | `builtin("db.insert@1", "users", row)` | Dynamic FinVM builtin bridge. |
+| Builtin (pure FFI) | `builtin("math.gcd@1", a, b)` | `CALL_BUILTIN` to a host function. |
+| Effect (async FFI) | `effect("telegram.send@1", chat, text)` | `EFFECT_AWAIT` protocol; any namespace (see Effects). |
 
 ### Types
 
@@ -220,10 +221,80 @@ interleaving may differ on real FinVM. For portable programs, make actor results
 order-insensitive, for example with commutative accumulation or a rendezvous
 through `cache`/state.
 
+## Effects (async I/O)
+
+Effectful builtins — `http.*`, `sys.*`, `db.*`, `cache.*` — do not run inside the
+pure VM. They compile to FinVM 1.1.0's **async effect protocol**: the prelude
+wrapper (`httpGet`, `sysLog`, `dbGet`, `cacheGet`, …) lowers to
+
+```
+EFFECT_NEW   <intent>   -- { type_, payload: { key, ...args } }
+EFFECT_AWAIT <intent>   -- suspend ONLY this process on the correlation key
+PROC_RECEIVE <reply>    -- host delivers VVariant "EffectReply" { key, value }
+VARIANT_PAYLOAD <rec>   -- unwrap to { key, value }
+RECORD_GET value        -- project the result
+```
+
+`EFFECT_AWAIT` suspends only the calling process; **other actors keep running**
+(Erlang-style), so one actor awaiting an HTTP fetch does not block the VM. The
+host driver performs the real I/O, delivers the result to the awaiting process,
+and journals every `(pid, key, intent, result)` pair so a run replays
+deterministically with zero I/O. This composes with the actor framework — an
+actor handler can do I/O and yield to its siblings.
+
+The bundled reference VM (which the playground/editor runs on) *executes* this
+protocol too: `EFFECT_AWAIT` is fulfilled synchronously through deterministic
+in-memory mocks (a fake HTTP/filesystem, an in-memory DB and cache), so effectful
+programs run end to end with no real I/O. A custom-namespace `effect(...)` with no
+reference mock yields `unit`. Real I/O happens only under the host driver.
+
+Each effect call site gets a unique correlation key. Two current limits: an effect
+inside a loop/recursion reuses its site key across iterations, and because
+`PROC_RECEIVE` is FIFO, an actor that already has messages queued when it awaits
+will dequeue those before the reply (fine for linear request/reply; selective
+receive is a future refinement).
+
+`db.*`/`cache.*` are modeled as effects (the external, persistent store via the
+host) rather than the VM's in-memory stateful builtins, so they go through the
+same async path.
+
+### Extending the FFI (no compiler or VM release)
+
+FinVM is extended entirely from the host: pure helpers are registered as
+`externalBuiltins`, effectful ones as effect handlers. Verdict exposes both as
+explicit source forms, so adding new FFI needs only a Verdict wrapper plus a host
+handler — never a new compiler or VM build:
+
+- **`builtin("ns.fn@v", a, b)`** — a PURE host function → `CALL_BUILTIN`. The host
+  registers `ns.fn` in `externalBuiltins`. (This is how `math.*`, `json.*`,
+  `regex.*`, `stats.*`, `series.*` are provided.)
+- **`effect("ns.fn@v", a, b)`** — an ASYNC host effect, for ANY namespace →
+  the `EFFECT_AWAIT` protocol with a `{ key, args: [a, b] }` payload. The host
+  registers an effect handler that reads `payload.args` and returns the result.
+
+```elm
+-- a brand-new effectful FFI the compiler has never heard of:
+tgSend : String -> String -> Bool
+tgSend chat text = effect("telegram.send@1", chat, text)
+```
+```js
+// host (the editor's FinVM driver):
+registry.register("telegram.send", async ({ args: [chat, text] }) => {
+  await telegram(chat, text); return true;
+});
+```
+
+`effect(...)` always lowers to the async protocol regardless of namespace, and the
+capability (`["telegram"]`) is inferred automatically. The curated `http/sys/db/
+cache` wrappers use named payload fields (the FinVM effects contract); custom
+effects use the generic `args` list.
+
 ## Sum Types
 
-FinVM has no variant opcodes, deliberately. Verdict lowers variants to tagged
-records:
+Verdict lowers user sum types to tagged records (a `$tag` field plus positional
+payload fields). FinVM 1.1.0 does have native `VARIANT_*` opcodes — Verdict uses
+`VARIANT_PAYLOAD` only to read effect replies — but user data types stay on the
+tagged-record encoding, which is simple and needs no per-constructor opcodes:
 
 ```elm
 type Shape = Circle Int | Rect Int Int | Origin

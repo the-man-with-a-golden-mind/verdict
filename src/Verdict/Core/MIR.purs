@@ -34,6 +34,13 @@ data MInstr
   | MEffectRequest VReg
   | MEffectBatchNew VReg
   | MEffectBatchAppend VReg VReg VReg
+  -- | Async effect (FinVM 1.1.0): suspend ONLY this process on the intent's
+  -- | correlation key; the host driver delivers the result to the mailbox as a
+  -- | `VVariant "EffectReply" { key, value }`, read back via PROC_RECEIVE.
+  | MEffectAwait VReg
+  -- | Unwrap a variant's payload (FinVM `VARIANT_PAYLOAD`); used to read the
+  -- | `{ key, value }` record out of an effect-reply message.
+  | MVariantPayload VReg VReg
   | MRecordNew VReg
   | MRecordSet VReg VReg Name VReg
   | MRecordGet VReg VReg Name
@@ -70,6 +77,7 @@ defOf = case _ of
   MBuiltin d _ _ -> Just d
   MLoadInput d _ -> Just d
   MEffectNew d _ _ -> Just d
+  MVariantPayload d _ -> Just d
   MEffectBatchNew d -> Just d
   MEffectBatchAppend d _ _ -> Just d
   MRecordNew d -> Just d
@@ -94,6 +102,8 @@ usesOf = case _ of
   MBuiltin _ _ args -> args
   MEffectNew _ _ payload -> [ payload ]
   MEffectRequest intent -> [ intent ]
+  MEffectAwait intent -> [ intent ]
+  MVariantPayload _ src -> [ src ]
   MEffectBatchAppend _ batch effect -> [ batch, effect ]
   MRecordSet _ r _ v -> [ r, v ]
   MRecordGet _ r _ -> [ r ]
@@ -138,6 +148,8 @@ mapVRegs f = case _ of
   MLoadInput d path -> MLoadInput (f d) path
   MEffectNew d n payload -> MEffectNew (f d) n (f payload)
   MEffectRequest intent -> MEffectRequest (f intent)
+  MEffectAwait intent -> MEffectAwait (f intent)
+  MVariantPayload d src -> MVariantPayload (f d) (f src)
   MEffectBatchNew d -> MEffectBatchNew (f d)
   MEffectBatchAppend d batch effect -> MEffectBatchAppend (f d) (f batch) (f effect)
   MRecordNew d -> MRecordNew (f d)

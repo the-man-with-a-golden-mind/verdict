@@ -139,6 +139,9 @@ monomorphize mod =
     EBuiltin name args ->
       let rargs = map rewriteCalls args
       in { expr: EBuiltin name (map _.expr rargs), requests: Array.concatMap _.requests rargs }
+    EEffect name args ->
+      let rargs = map rewriteCalls args
+      in { expr: EEffect name (map _.expr rargs), requests: Array.concatMap _.requests rargs }
     EList xs ->
       let rxs = map rewriteCalls xs
       in { expr: EList (map _.expr rxs), requests: Array.concatMap _.requests rxs }
@@ -252,6 +255,7 @@ renameFns subst = go subst
     ELet n e body -> ELet n (go s e) (go (Map.delete n s) body)
     ECall f args -> ECall (fromMaybe f (Map.lookup f s)) (map (go s) args)
     EBuiltin name args -> EBuiltin name (map (go s) args)
+    EEffect name args -> EEffect name (map (go s) args)
     EList xs -> EList (map (go s) xs)
     ERecord fields -> ERecord (map (\(Tuple n e) -> Tuple n (go s e)) fields)
     EField e name -> EField (go s e) name

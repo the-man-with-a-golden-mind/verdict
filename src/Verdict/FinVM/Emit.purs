@@ -92,6 +92,8 @@ convInstr = case _ of
   MLoadInput d path -> pure (LoadInput d path)
   MEffectNew d typ payload -> pure (EffectNew d typ payload)
   MEffectRequest intent -> pure (EffectRequest intent)
+  MEffectAwait intent -> pure (EffectAwait intent)
+  MVariantPayload d src -> pure (VariantPayload d src)
   MEffectBatchNew d -> pure (EffectBatchNew d)
   MEffectBatchAppend d batch effect -> pure (EffectBatchAppend d batch effect)
   MRecordNew d -> pure (RecordNew d)

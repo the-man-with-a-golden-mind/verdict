@@ -45,9 +45,14 @@ hasNone src needles =
   let o = out src
   in sum (map (\n -> if contains (Pattern n) o then 1 else 0) needles) == 0
 
+-- An effectful builtin lowers to FinVM 1.1.0's async protocol: build the intent
+-- (EFFECT_NEW), suspend this process on it (EFFECT_AWAIT), then receive the reply
+-- (PROC_RECEIVE) and unwrap it (VARIANT_PAYLOAD) — not the old synchronous
+-- EFFECT_REQUEST + LOAD_INPUT, which blocked the whole VM.
 hasEffectProtocol :: String -> String -> Boolean
 hasEffectProtocol src typ =
-  hasAll src [ "\"EFFECT_NEW\"", typ, "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ]
+  hasAll src [ "\"EFFECT_NEW\"", typ, "\"EFFECT_AWAIT\"", "\"PROC_RECEIVE\"", "\"VARIANT_PAYLOAD\"" ]
+    && hasNone src [ "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ]
 
 isError :: String -> Boolean
 isError src = case compile src of
@@ -623,6 +628,32 @@ main = do
     (hasEffectProtocol (m "main : Int\nmain = strLength(withDefault(\"\", sysEnv(\"VERDICT\")))") "sys.env")
   assert fails "sysCwd infers [sys] capability"
     (capsOf (m "main : String\nmain = sysCwd") == [ "sys" ])
+  -- Extensible FFI: `effect("ns.fn@v", ...)` lowers to the async protocol for ANY
+  -- namespace the compiler has never heard of (here "telegram") — add effectful
+  -- FFI with just a Verdict wrapper + a host handler, no compiler/VM release.
+  let customEffect = m
+        ( "tgSend : String -> String -> Bool\n"
+            <> "tgSend chat text = effect(\"telegram.send@1\", chat, text)\n"
+            <> "main : Int\nmain = if tgSend(\"c\", \"hi\") then 1 else 0"
+        )
+  assert fails "custom effect() lowers to async protocol for an unknown namespace"
+    (hasEffectProtocol customEffect "telegram.send")
+  assert fails "custom effect() auto-infers its capability namespace"
+    (capsOf customEffect == [ "telegram" ])
+  assert fails "builtin() stays a pure CALL_BUILTIN (not an effect)"
+    (hasAll (m "main : Int\nmain = builtin(\"math.gcd@1\", 12, 8)") [ "\"CALL_BUILTIN\"", "math.gcd@1" ]
+      && hasNone (m "main : Int\nmain = builtin(\"math.gcd@1\", 12, 8)") [ "\"EFFECT_AWAIT\"" ])
+  -- Effects EXECUTE on the reference VM (the editor's runtime): EFFECT_AWAIT is
+  -- fulfilled deterministically through the in-memory mocks, so effectful
+  -- programs run end to end, not just emit the right opcodes.
+  assert fails "httpGet effect runs on the reference VM -> 200"
+    (evalsTo (m "main : Int\nmain = httpGet(\"https://x\").status") "200")
+  assert fails "db insert/get round-trips through effects -> 30"
+    (evalsTo (m "main : Int\nmain =\n  let id = dbInsert(\"users\", { age = 30 }) in\n  dbGet(\"users\", id).age") "30")
+  assert fails "sysLog effect runs and continues"
+    (evalsTo (m "main : Int\nmain = let _ = sysLog(\"hi\") in 7") "7")
+  assert fails "cache set/get round-trips through effects -> 5"
+    (evalsTo (m "main : Int\nmain =\n  let _ = cacheSet(\"ns\", \"k\", 5) in\n  cacheGet(\"ns\", \"k\")") "5")
   assert fails "sortInts orders bigint ints"
     (evalsTo (m "main : Int\nmain = sortInts([30, 10, 20])[0]") "10")
   assert fails "distinctInts + sumIntsFast"
@@ -899,7 +930,7 @@ main = do
   assert fails "direct db builtins lower to effects, not CALL_BUILTIN"
     (hasAll
        (m "main : Int\nmain =\n  let id = builtin(\"db.insert@1\", \"users\", { age = 30 }) in\n  builtin(\"db.get@1\", \"users\", id).age")
-       [ "db.insert", "db.get", "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ]
+       [ "db.insert", "db.get", "\"EFFECT_AWAIT\"", "\"VARIANT_PAYLOAD\"" ]
       && hasNone
            (m "main : Int\nmain =\n  let id = builtin(\"db.insert@1\", \"users\", { age = 30 }) in\n  builtin(\"db.get@1\", \"users\", id).age")
            [ "db.insert@1", "db.get@1" ])
@@ -972,7 +1003,7 @@ main = do
   assert fails "examples/request_reply.verdict runs -> 42"
     (evalsTo requestReplyExample "42")
   assert fails "examples/fan_in.verdict compiles cache rendezvous as effects"
-    (hasAll fanInExample [ "cache.get", "cache.set", "\"EFFECT_REQUEST\"" ])
+    (hasAll fanInExample [ "cache.get", "cache.set", "\"EFFECT_AWAIT\"" ])
   assert fails "example programs emit process opcodes"
     (hasAll requestReplyExample [ "\"PROC_SELF\"", "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"" ]
       && hasAll fanInExample [ "\"PROC_SPAWN\"", "\"PROC_SEND\"", "\"PROC_RECEIVE\"", "\"PROC_YIELD\"" ])
@@ -1107,6 +1138,23 @@ main = do
               <> "bad ref = actorSend(ref, \"not a message\")\n"
               <> "main : Unit\nmain = bad(actorSelf(unit))"
           )))
+  -- Async effects compose with actors: an actor handler that does I/O lowers to
+  -- the async protocol (EFFECT_AWAIT suspends only that actor) and the loop stays
+  -- tail-recursive — so siblings keep running while one actor awaits.
+  let actorIo = m
+        ( "type Msg = Fetch String Pid\n"
+            <> "handle : Msg -> Int -> { stop : Bool, state : Int }\n"
+            <> "handle msg state = match msg {\n"
+            <> "  Fetch url replyTo ->\n"
+            <> "    let body = httpGet(url).body in\n"
+            <> "    let _ = send(replyTo, { body = body }) in actorContinue(state + 1)\n"
+            <> "}\n"
+            <> "server : Int -> Unit\nserver state = actorLoop(handle, state)\n"
+            <> "main : Int\nmain = let s = actorStart(server, 0) in 1"
+        )
+  assert fails "actor handler can do async I/O (EFFECT_AWAIT, no whole-VM block)"
+    (hasAll actorIo [ "\"EFFECT_AWAIT\"", "\"VARIANT_PAYLOAD\"", "\"TAIL_CALL\"", "\"PROC_SPAWN\"" ]
+      && hasNone actorIo [ "\"EFFECT_REQUEST\"", "\"LOAD_INPUT\"" ])
 
   n <- Ref.read fails
   if n == 0 then log "\nAll tests passed."

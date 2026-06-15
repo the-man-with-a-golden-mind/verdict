@@ -2,7 +2,7 @@
 -- | and result types come from the signature, everything inside is inferred and
 -- | matched with `compatible` (which treats the internal `TUnknown` as a
 -- | wildcard, e.g. for empty lists and FFI results).
-module Verdict.Typecheck (TypeError(..), showTypeError, checkModule) where
+module Verdict.Typecheck (TypeError(..), showTypeError, checkModule, locate) where
 
 import Prelude
 
@@ -67,6 +67,13 @@ showTypeError = case _ of
   MatchNonExhaustive n -> "match on '" <> n <> "' is not exhaustive"
   DataArityMismatch n want got ->
     "type '" <> n <> "' expects " <> show want <> " type argument(s) but got " <> show got
+
+-- | Structured position + message for a type error (for editor diagnostics).
+-- | A non-located error reports at 1:1.
+locate :: TypeError -> { line :: Int, column :: Int, message :: String }
+locate = case _ of
+  Located p e -> { line: p.line, column: p.column, message: showTypeError e }
+  e -> { line: 1, column: 1, message: showTypeError e }
 
 relocate :: SourcePos -> TypeError -> TypeError
 relocate pos err = case err of
@@ -421,6 +428,10 @@ infer env locals = case _ of
           Right (applySubst subst sch.ret)
 
   EBuiltin _ args -> do
+    traverse_ (infer env locals) args
+    Right TUnknown
+
+  EEffect _ args -> do
     traverse_ (infer env locals) args
     Right TUnknown
 

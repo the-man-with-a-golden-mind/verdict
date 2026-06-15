@@ -195,6 +195,7 @@ parseAtom = defer \_ -> do
       <|> parseList
       <|> parseRecord
       <|> parseBuiltin
+      <|> parseEffect
       <|> parseCallOrVar
       <|> between (symbol "(") (symbol ")") parseExpr
   pure (EAt { line: p.line, column: p.column } e)
@@ -232,6 +233,16 @@ parseBuiltin = defer \_ -> do
   args <- PA.many (symbol "," *> parseExpr)
   _ <- symbol ")"
   pure (EBuiltin bid args)
+
+-- | `effect("ns.fn@v", arg1, arg2)` — an async host effect (any namespace).
+parseEffect :: Parser String Expr
+parseEffect = defer \_ -> do
+  keyword "effect"
+  _ <- symbol "("
+  eid <- stringLiteral
+  args <- PA.many (symbol "," *> parseExpr)
+  _ <- symbol ")"
+  pure (EEffect eid args)
 
 parseCallOrVar :: Parser String Expr
 parseCallOrVar = defer \_ -> do
