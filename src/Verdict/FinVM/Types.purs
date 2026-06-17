@@ -1,4 +1,18 @@
-module Verdict.FinVM.Types where
+module Verdict.FinVM.Types
+  ( FunctionVM
+  , InputSchemaEntry(..)
+  , InputsVM(..)
+  , InstructionVM(..)
+  , ProgramVM
+  , TypeVM(..)
+  , ValueVM(..)
+  , encodeProgramVM
+  , inputSchemaDefaults
+  , inputSchemaEntries
+  , inputSchemaName
+  , inputSchemaRequired
+  , inputSchemaTypeName
+  ) where
 
 import Prelude
 
@@ -7,6 +21,7 @@ import Data.Argonaut.Core as J
 import Data.Array as Array
 import Data.Argonaut.Encode (class EncodeJson, encodeJson)
 import Data.Argonaut.Encode.Combinators ((:=), (~>))
+import Data.Maybe (Maybe(..))
 import Foreign.Object as FO
 
 --------------------------------------------------------------------------------
@@ -186,6 +201,45 @@ encodeFunctionVM f =
     ~> "arity" := f.arity
     ~> J.jsonEmptyObject
 
+newtype InputSchemaEntry = InputSchemaEntry
+  { name :: String
+  , typeName :: String
+  , required :: Boolean
+  }
+
+instance encodeJsonInputSchemaEntry :: EncodeJson InputSchemaEntry where
+  encodeJson (InputSchemaEntry e) =
+    "name" := e.name
+      ~> "type" := e.typeName
+      ~> "required" := e.required
+      ~> J.jsonEmptyObject
+
+inputSchemaName :: InputSchemaEntry -> String
+inputSchemaName (InputSchemaEntry e) = e.name
+
+inputSchemaTypeName :: InputSchemaEntry -> String
+inputSchemaTypeName (InputSchemaEntry e) = e.typeName
+
+inputSchemaRequired :: InputSchemaEntry -> Boolean
+inputSchemaRequired (InputSchemaEntry e) = e.required
+
+newtype InputsVM = InputsVM
+  { schema :: Array InputSchemaEntry
+  , defaults :: FO.Object ValueVM
+  }
+
+inputSchemaEntries :: InputsVM -> Array InputSchemaEntry
+inputSchemaEntries (InputsVM ins) = ins.schema
+
+inputSchemaDefaults :: InputsVM -> FO.Object ValueVM
+inputSchemaDefaults (InputsVM ins) = ins.defaults
+
+instance encodeJsonInputsVM :: EncodeJson InputsVM where
+  encodeJson (InputsVM ins) =
+    let base = "schema" := ins.schema
+    in if FO.isEmpty ins.defaults then base ~> J.jsonEmptyObject
+    else base ~> "defaults" := ins.defaults ~> J.jsonEmptyObject
+
 type ProgramVM =
   { version :: String
   , constants :: Array ValueVM
@@ -198,14 +252,25 @@ type ProgramVM =
   , capabilities :: Array String
   , verification :: { verified :: Boolean }
   , limits :: { maxSteps :: Int }
+  , inputs :: Maybe InputsVM
   }
 
 encodeProgramVM :: ProgramVM -> Json
-encodeProgramVM p =
-  "capabilities" := p.capabilities
-    ~> "limits" := ("maxSteps" := p.limits.maxSteps ~> J.jsonEmptyObject)
-    ~> "functions" := map encodeFunctionVM p.functions
-    ~> "entrypoint" := p.entrypoint
-    ~> "constants" := p.constants
-    ~> "version" := p.version
-    ~> J.jsonEmptyObject
+encodeProgramVM p = case p.inputs of
+  Nothing ->
+    "capabilities" := p.capabilities
+      ~> "limits" := ("maxSteps" := p.limits.maxSteps ~> J.jsonEmptyObject)
+      ~> "functions" := map encodeFunctionVM p.functions
+      ~> "entrypoint" := p.entrypoint
+      ~> "constants" := p.constants
+      ~> "version" := p.version
+      ~> J.jsonEmptyObject
+  Just ins ->
+    "capabilities" := p.capabilities
+      ~> "limits" := ("maxSteps" := p.limits.maxSteps ~> J.jsonEmptyObject)
+      ~> "functions" := map encodeFunctionVM p.functions
+      ~> "entrypoint" := p.entrypoint
+      ~> "constants" := p.constants
+      ~> "version" := p.version
+      ~> "inputs" := ins
+      ~> J.jsonEmptyObject

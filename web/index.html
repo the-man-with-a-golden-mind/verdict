@@ -14,9 +14,19 @@
     header { padding: 14px 20px; border-bottom: 1px solid #232a33; }
     header h1 { margin: 0; font-size: 16px; }
     header p { margin: 4px 0 0; color: #8b97a5; font-size: 12px; }
-    main { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; height: calc(100vh - 64px); background: #232a33; }
-    .pane { display: flex; flex-direction: column; background: #0e1116; min-width: 0; }
-    .pane > label { padding: 8px 14px; color: #8b97a5; font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+    main {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      grid-template-rows: 1fr auto auto;
+      gap: 1px;
+      height: calc(100vh - 64px);
+      background: #232a33;
+    }
+    .pane { display: flex; flex-direction: column; background: #0e1116; min-width: 0; min-height: 0; }
+    .pane > label {
+      padding: 8px 14px; color: #8b97a5; font-size: 11px;
+      text-transform: uppercase; letter-spacing: .08em;
+    }
     textarea, pre {
       flex: 1; margin: 0; padding: 14px; border: 0; outline: 0; resize: none;
       background: #0e1116; color: #e6e6e6; font: inherit; tab-size: 2;
@@ -25,40 +35,88 @@
     textarea { border-top: 1px solid #232a33; }
     pre { border-top: 1px solid #232a33; }
     pre.error { color: #ff6b6b; }
+    .inputs-pane { grid-column: 1; grid-row: 2; }
+    .inputs-pane textarea { min-height: 88px; flex: 0 0 88px; }
+    .run-pane { grid-column: 1 / span 2; grid-row: 3; max-height: 38vh; }
+    .toolbar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      padding: 8px 14px; border-top: 1px solid #232a33;
+    }
+    button {
+      font: inherit; padding: 6px 12px; border-radius: 6px;
+      border: 1px solid #3a4654; background: #1a2230; color: #e6e6e6; cursor: pointer;
+    }
+    button:hover { background: #243041; }
+    .hint { color: #8b97a5; font-size: 11px; }
+    #schema { padding: 0 14px 8px; color: #8b97a5; font-size: 11px; border-top: 1px solid #232a33; }
   </style>
 </head>
 <body>
   <header>
     <h1>Verdict → FinVM</h1>
-    <p>Compiles in your browser. The same <code>Verdict.Compiler</code> module also runs on Node.</p>
+    <p>Compiles and runs on the reference VM. Runtime inputs sync from <code>inputs.schema</code> / <code>inputs.defaults</code>.</p>
   </header>
   <main>
     <div class="pane">
       <label for="src">Verdict source</label>
       <textarea id="src" spellcheck="false">module Main exposing (main)
 
-square : Int -> Int
-square x =
-  x * x
+input limit : Int = 5
 
 main : Int
 main =
-  square(7) + 40 / 4 - 2 * 100000000000000000000
+  limit
 </textarea>
     </div>
     <div class="pane">
       <label>FinVM program (JSON)</label>
       <pre id="out"></pre>
     </div>
+    <div class="pane inputs-pane">
+      <label for="inputs">Runtime inputs (JSON object)</label>
+      <div id="schema"></div>
+      <textarea id="inputs" spellcheck="false">{}</textarea>
+    </div>
+    <div class="pane run-pane">
+      <label>Reference VM result</label>
+      <div class="toolbar">
+        <button type="button" id="run">Run</button>
+        <button type="button" id="resetInputs">Reset inputs from program</button>
+        <span class="hint">Edit inputs manually or reset to compiled defaults.</span>
+      </div>
+      <pre id="runOut"></pre>
+    </div>
   </main>
 
   <script type="module">
-    import { compileJS } from './verdict.mjs';
+    import { compileJS, programInputsJS, runJS } from './verdict.mjs';
 
     const src = document.getElementById('src');
+    const inputs = document.getElementById('inputs');
+    const schema = document.getElementById('schema');
     const out = document.getElementById('out');
+    const runOut = document.getElementById('runOut');
+    const runBtn = document.getElementById('run');
+    const resetBtn = document.getElementById('resetInputs');
 
-    function run() {
+    let inputsTouched = false;
+    let runTimer = null;
+
+    function formatSchema(info) {
+      if (!info.ok || info.schema.length === 0) return 'No declared inputs.';
+      return info.schema
+        .map((e) => `${e.name}: ${e.type}${e.required ? ' (required)' : ' (optional)'}`)
+        .join(' · ');
+    }
+
+    function syncInputsFromProgram(force) {
+      const info = programInputsJS(src.value);
+      schema.textContent = formatSchema(info);
+      if (!info.ok || (!force && inputsTouched)) return;
+      inputs.value = JSON.stringify(info.defaults ?? {}, null, 2);
+    }
+
+    function compile() {
       const result = compileJS(src.value);
       if (result.ok) {
         out.className = '';
@@ -67,9 +125,60 @@ main =
         out.className = 'error';
         out.textContent = result.error;
       }
+      syncInputsFromProgram(false);
     }
 
-    src.addEventListener('input', run);
+    function parseInputs() {
+      try {
+        const parsed = JSON.parse(inputs.value || '{}');
+        if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
+          throw new Error('inputs must be a JSON object');
+        }
+        return { ok: true, value: parsed };
+      } catch (err) {
+        return { ok: false, error: String(err.message || err) };
+      }
+    }
+
+    function run() {
+      compile();
+      const parsed = parseInputs();
+      if (!parsed.ok) {
+        runOut.className = 'error';
+        runOut.textContent = parsed.error;
+        return;
+      }
+      const result = runJS(src.value)(parsed.value);
+      if (result.ok) {
+        runOut.className = '';
+        runOut.textContent = result.output;
+      } else {
+        runOut.className = 'error';
+        runOut.textContent = result.error;
+      }
+    }
+
+    function scheduleRun() {
+      clearTimeout(runTimer);
+      runTimer = setTimeout(run, 350);
+    }
+
+    src.addEventListener('input', () => {
+      compile();
+      scheduleRun();
+    });
+    inputs.addEventListener('input', () => {
+      inputsTouched = true;
+      scheduleRun();
+    });
+    runBtn.addEventListener('click', run);
+    resetBtn.addEventListener('click', () => {
+      inputsTouched = false;
+      syncInputsFromProgram(true);
+      run();
+    });
+
+    compile();
     run();
   </script>
 </body>

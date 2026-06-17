@@ -80,6 +80,35 @@ closures.
 | Lists | `[1, 2, 3]`, `xs[i]` | Indexing desugars to `get(xs, i)`. |
 | Builtin (pure FFI) | `builtin("math.gcd@1", a, b)` | `CALL_BUILTIN` to a host function. |
 | Effect (async FFI) | `effect("telegram.send@1", chat, text)` | `EFFECT_AWAIT` protocol; any namespace (see Effects). |
+| Program input | `input threshold : Int` | Typed run-time parameter; lowers to `input.get@1`. |
+| Optional input | `input limit : Int = 5` | Optional (`required: false`); default in `inputs.defaults`. |
+
+### Program inputs
+
+Declare typed parameters before functions:
+
+```verdict
+input signalThreshold : Int
+input assetsCsv : String
+
+main : Int
+main = signalThreshold + strLength(assetsCsv)
+```
+
+Optional inputs use a literal default:
+
+```verdict
+input pageSize : Int = 50
+```
+
+The compiler emits `inputs.schema` (and `inputs.defaults` when needed) in the
+program JSON. It does not embed run-time values or perform encryption — supply
+values as a JSON object mapping names to tagless FinVM values:
+
+- `runJS(src)(values)` / `runWithInputsJS` — compile + run (pass `{}` for defaults only)
+- `programInputsJS(src)` — introspect schema + defaults for editors
+- `evalBindingsJS(src)(values)` — evaluate nullary top-level bindings with inputs
+- `verdictrun --inputs values.json` or a `<case>.inputs.json` sidecar for conformance
 
 ### Types
 

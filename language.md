@@ -23,6 +23,32 @@ main : Int
 main = double(21)
 ```
 
+Programs may declare typed run-time inputs before functions:
+
+```verdict
+input signalThreshold : Int
+input assetsCsv : String
+
+main : Int
+main = signalThreshold + strLength(assetsCsv)
+```
+
+Input names are in scope as values of their declared type. The compiler lowers
+reads to `input.get@1("name")` and emits an `inputs.schema` block in the
+program JSON (no run-time values — the host supplies those separately).
+
+Optional inputs declare a literal default:
+
+```verdict
+input pageSize : Int = 50
+```
+
+These emit `"required": false` and an `inputs.defaults` map (program-defined
+constants, not encrypted run-time payloads).
+
+For dynamic access by name (escape hatch), the prelude provides `inputGet`,
+`inputInt`, `inputBool`, and `inputString` — all lower to `input.get@1`.
+
 Function calls use parentheses and commas: `f(a, b)`, not curried call syntax.
 Definitions bind parameters with spaces: `f a b = ...`.
 

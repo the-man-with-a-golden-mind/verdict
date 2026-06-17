@@ -17,7 +17,7 @@ import Parsing.Language (emptyDef)
 import Parsing.String (char, eof, string)
 import Parsing.String.Basic (alphaNum, digit, lower, upper)
 import Parsing.Token (GenLanguageDef(..), LanguageDef, TokenParser, makeTokenParser, unGenLanguageDef)
-import Verdict.Syntax.AST (BinOp(..), Ctor, CmpOp(..), Decl(..), Exposing(..), Expr(..), Import, Lit(..), Module(..), Name, ParsedModule, Pattern(..), Ty(..), TypeDecl(..))
+import Verdict.Syntax.AST (BinOp(..), Ctor, CmpOp(..), Decl(..), Exposing(..), Expr(..), Import, InputDecl(..), Lit(..), Module(..), Name, ParsedModule, Pattern(..), Ty(..), TypeDecl(..))
 
 -- | `emptyDef` with Haskell-style comments enabled (`--` line, `{- -}` block).
 langDef :: LanguageDef
@@ -362,6 +362,15 @@ parseDef = do
   e <- parseExpr
   pure { name: n, params: ps, body: e }
 
+parseInputDecl :: Parser String InputDecl
+parseInputDecl = do
+  keyword "input"
+  n <- identifier
+  _ <- symbol ":"
+  t <- parseType
+  mdef <- optionMaybe (symbol "=" *> parseLiteral)
+  pure (InputDecl n t mdef)
+
 parseItem :: Parser String Decl
 parseItem = do
   msig <- optionMaybe (try parseSig)
@@ -382,10 +391,11 @@ parseModule = do
   exposing <- parseExposing
   imports <- Array.fromFoldable <$> PA.many parseImport
   types <- PA.many parseTypeDecl
+  inputs <- PA.many parseInputDecl
   items <- PA.many1 parseItem
   _ <- eof
   pure
-    { mod: Module modName (Array.fromFoldable types) (NEA.toArray items)
+    { mod: Module modName (Array.fromFoldable types) (Array.fromFoldable inputs) (NEA.toArray items)
     , exposing
     , imports
     }

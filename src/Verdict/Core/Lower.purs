@@ -16,7 +16,7 @@ import Data.String.CodeUnits as SCU
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..))
 import Verdict.Core.MIR (MFunc, MInstr(..), VReg, Label)
-import Verdict.Syntax.AST (BinOp(..), CmpOp(..), Ctor, Decl(..), Expr(..), Lit(..), Module(..), Name, Pattern(..), Ty(..), TypeDecl(..), splitArrow, stripAt)
+import Verdict.Syntax.AST (BinOp(..), CmpOp(..), Ctor, Decl(..), Expr(..), InputDecl(..), Lit(..), Module(..), Name, Pattern(..), Ty(..), TypeDecl(..), splitArrow, stripAt)
 
 type LowerState =
   { nextReg :: VReg
@@ -28,6 +28,7 @@ type LowerState =
 
 type Env = Map Name VReg
 type CtorMap = Map Name Ctor
+type InputSet = Map Name Ty
 
 type L a = State LowerState a
 
@@ -56,62 +57,69 @@ freshEffectId = do
 -- Expressions (value position): returns the vreg holding the result.
 --------------------------------------------------------------------------------
 
-lowerExpr :: CtorMap -> Env -> Expr -> L VReg
-lowerExpr ctors env = case _ of
-  EAt _ e -> lowerExpr ctors env e
+lowerExpr :: InputSet -> CtorMap -> Env -> Expr -> L VReg
+lowerExpr inputs ctors env = case _ of
+  EAt _ e -> lowerExpr inputs ctors env e
 
   ELit lit -> do
     r <- freshReg
     emit (MLoad r lit)
     pure r
 
-  EVar n -> case Map.lookup n env of
-    Just r -> pure r
-    Nothing -> case Map.lookup n ctors of
-      Just ctor | Array.null ctor.fields -> lowerCtor n []
-      _ -> do
-        -- nullary reference to a top-level value
-        r <- freshReg
-        emit (MCall r n [])
-        pure r
+  EVar n -> case Map.lookup n inputs of
+    Just _ -> do
+      nameReg <- freshReg
+      emit (MLoad nameReg (LStr n))
+      r <- freshReg
+      emit (MBuiltin r "input.get@1" [ nameReg ])
+      pure r
+    Nothing -> case Map.lookup n env of
+      Just r -> pure r
+      Nothing -> case Map.lookup n ctors of
+        Just ctor | Array.null ctor.fields -> lowerCtor n []
+        _ -> do
+          -- nullary reference to a top-level value
+          r <- freshReg
+          emit (MCall r n [])
+          pure r
 
   EBin op a b -> do
-    ra <- lowerExpr ctors env a
-    rb <- lowerExpr ctors env b
+    ra <- lowerExpr inputs ctors env a
+    rb <- lowerExpr inputs ctors env b
     r <- freshReg
     emit (MBin op r ra rb)
     pure r
 
   ECmp op a b -> do
-    ra <- lowerExpr ctors env a
-    rb <- lowerExpr ctors env b
+    ra <- lowerExpr inputs ctors env a
+    rb <- lowerExpr inputs ctors env b
     r <- freshReg
     emit (MCmp op r ra rb)
     pure r
 
   EIf c t e -> do
-    rc <- lowerExpr ctors env c
+    rc <- lowerExpr inputs ctors env c
     dst <- freshReg
     elseL <- freshLabel "else"
     endL <- freshLabel "end"
     emit (MJumpIfFalse rc elseL)
-    rt <- lowerExpr ctors env t
+    rt <- lowerExpr inputs ctors env t
     emit (MMove dst rt)
     emit (MJump endL)
     emit (MLabel elseL)
-    re <- lowerExpr ctors env e
+    re <- lowerExpr inputs ctors env e
     emit (MMove dst re)
     emit (MLabel endL)
     pure dst
 
   ELet n e body -> do
-    re <- lowerExpr ctors env e
-    lowerExpr ctors (Map.insert n re env) body
+    re <- lowerExpr inputs ctors env e
+    lowerExpr inputs ctors (Map.insert n re env) body
 
   ECall "spawn" args -> case Array.uncons args of
     Just { head: fnRef, tail: rest } -> case stripAt fnRef of
       EVar fnName -> do
-        rs <- traverse (lowerExpr ctors env) rest
+        rs <- traverse (lowerExpr inputs ctors env) rest
         r <- freshReg
         emit (MSpawn r fnName rs)
         pure r
@@ -127,7 +135,7 @@ lowerExpr ctors env = case _ of
   ECall "actorStart" args -> case Array.uncons args of
     Just { head: fnRef, tail: rest } -> case stripAt fnRef of
       EVar fnName -> do
-        rs <- traverse (lowerExpr ctors env) rest
+        rs <- traverse (lowerExpr inputs ctors env) rest
         pid <- freshReg
         emit (MSpawn pid fnName rs)
         lowerCtor "MkActorRef" [ pid ]
@@ -141,8 +149,8 @@ lowerExpr ctors env = case _ of
       lowerCtor "MkActorRef" [ pid ]
 
   ECall "send" [ pid, msg ] -> do
-    rp <- lowerExpr ctors env pid
-    rm <- lowerExpr ctors env msg
+    rp <- lowerExpr inputs ctors env pid
+    rm <- lowerExpr inputs ctors env msg
     emit (MSend rp rm)
     r <- freshReg
     emit (MLoad r LUnit)
@@ -165,34 +173,34 @@ lowerExpr ctors env = case _ of
     pure r
 
   ECall "length" [ xs ] -> do
-    rxs <- lowerExpr ctors env xs
+    rxs <- lowerExpr inputs ctors env xs
     r <- freshReg
     emit (MListLength r rxs)
     pure r
 
   ECall "get" [ xs, ix ] -> do
-    rxs <- lowerExpr ctors env xs
-    rix <- lowerExpr ctors env ix
+    rxs <- lowerExpr inputs ctors env xs
+    rix <- lowerExpr inputs ctors env ix
     r <- freshReg
     emit (MListGet r rxs rix)
     pure r
 
   ECall "append" [ xs, x ] -> do
-    rxs <- lowerExpr ctors env xs
-    rx <- lowerExpr ctors env x
+    rxs <- lowerExpr inputs ctors env xs
+    rx <- lowerExpr inputs ctors env x
     r <- freshReg
     emit (MListAppend r rxs rx)
     pure r
 
   ECall "mod" [ a, b ] -> do
-    ra <- lowerExpr ctors env a
-    rb <- lowerExpr ctors env b
+    ra <- lowerExpr inputs ctors env a
+    rb <- lowerExpr inputs ctors env b
     r <- freshReg
     emit (MBin OpMod r ra rb)
     pure r
 
   ECall f args -> do
-    rs <- traverse (lowerExpr ctors env) args
+    rs <- traverse (lowerExpr inputs ctors env) args
     case Map.lookup f ctors of
       Just _ -> lowerCtor f rs
       Nothing -> do
@@ -201,7 +209,7 @@ lowerExpr ctors env = case _ of
         pure r
 
   EBuiltin name args -> do
-    rs <- traverse (lowerExpr ctors env) args
+    rs <- traverse (lowerExpr inputs ctors env) args
     if isEffectfulBuiltin name then lowerEffectBuiltin name rs
     else do
       r <- freshReg
@@ -210,11 +218,11 @@ lowerExpr ctors env = case _ of
 
   -- `effect(...)` always lowers to the async effect protocol, for ANY namespace.
   EEffect name args -> do
-    rs <- traverse (lowerExpr ctors env) args
+    rs <- traverse (lowerExpr inputs ctors env) args
     lowerEffectBuiltin name rs
 
   EList xs -> do
-    rs <- traverse (lowerExpr ctors env) xs
+    rs <- traverse (lowerExpr inputs ctors env) xs
     r <- freshReg
     emit (MListNew r)
     traverse_ (\v -> emit (MListAppend r r v)) rs
@@ -225,33 +233,33 @@ lowerExpr ctors env = case _ of
     emit (MRecordNew r)
     traverse_
       ( \(Tuple fname fe) -> do
-          rv <- lowerExpr ctors env fe
+          rv <- lowerExpr inputs ctors env fe
           emit (MRecordSet r r fname rv)
       )
       fields
     pure r
 
   EField e fname -> do
-    re <- lowerExpr ctors env e
+    re <- lowerExpr inputs ctors env e
     r <- freshReg
     emit (MRecordGet r re fname)
     pure r
 
   ESwitch scrut arms -> do
-    rs <- lowerExpr ctors env scrut
+    rs <- lowerExpr inputs ctors env scrut
     dst <- freshReg
     endL <- freshLabel "swend"
-    traverse_ (lowerSwitchArm ctors env rs dst endL) arms
+    traverse_ (lowerSwitchArm inputs ctors env rs dst endL) arms
     emit (MLabel endL)
     pure dst
 
   EMatch scrut arms -> do
-    rs <- lowerExpr ctors env scrut
+    rs <- lowerExpr inputs ctors env scrut
     dst <- freshReg
     tag <- freshReg
     endL <- freshLabel "matchend"
     emit (MRecordGet tag rs "$tag")
-    traverse_ (lowerMatchArm ctors env rs tag dst endL) arms
+    traverse_ (lowerMatchArm inputs ctors env rs tag dst endL) arms
     emit (MLabel endL)
     pure dst
   where
@@ -368,8 +376,8 @@ recordPayload fields = do
 
 -- | One switch arm: a literal arm compares the scrutinee and skips on miss; the
 -- | default arm always runs. Every arm writes the shared result register.
-lowerSwitchArm :: CtorMap -> Env -> VReg -> VReg -> Label -> Tuple (Maybe Lit) Expr -> L Unit
-lowerSwitchArm ctors env rs dst endL (Tuple pat body) = case pat of
+lowerSwitchArm :: InputSet -> CtorMap -> Env -> VReg -> VReg -> Label -> Tuple (Maybe Lit) Expr -> L Unit
+lowerSwitchArm inputs ctors env rs dst endL (Tuple pat body) = case pat of
   Just lit -> do
     rl <- freshReg
     emit (MLoad rl lit)
@@ -377,19 +385,19 @@ lowerSwitchArm ctors env rs dst endL (Tuple pat body) = case pat of
     emit (MCmp CmpEq rc rs rl)
     nextL <- freshLabel "swnext"
     emit (MJumpIfFalse rc nextL)
-    rb <- lowerExpr ctors env body
+    rb <- lowerExpr inputs ctors env body
     emit (MMove dst rb)
     emit (MJump endL)
     emit (MLabel nextL)
   Nothing -> do
-    rb <- lowerExpr ctors env body
+    rb <- lowerExpr inputs ctors env body
     emit (MMove dst rb)
     emit (MJump endL)
 
-lowerMatchArm :: CtorMap -> Env -> VReg -> VReg -> VReg -> Label -> Tuple Pattern Expr -> L Unit
-lowerMatchArm ctors env scrut tag dst endL (Tuple pat body) = case pat of
+lowerMatchArm :: InputSet -> CtorMap -> Env -> VReg -> VReg -> VReg -> Label -> Tuple Pattern Expr -> L Unit
+lowerMatchArm inputs ctors env scrut tag dst endL (Tuple pat body) = case pat of
   PWild -> do
-    rb <- lowerExpr ctors env body
+    rb <- lowerExpr inputs ctors env body
     emit (MMove dst rb)
     emit (MJump endL)
   PCtor ctor vars -> do
@@ -406,7 +414,7 @@ lowerMatchArm ctors env scrut tag dst endL (Tuple pat body) = case pat of
           pure (Tuple name r)
       )
       (Array.mapWithIndex Tuple vars)
-    rb <- lowerExpr ctors (Map.union (Map.fromFoldable payloads) env) body
+    rb <- lowerExpr inputs ctors (Map.union (Map.fromFoldable payloads) env) body
     emit (MMove dst rb)
     emit (MJump endL)
     emit (MLabel nextL)
@@ -415,8 +423,8 @@ lowerMatchArm ctors env scrut tag dst endL (Tuple pat body) = case pat of
 -- Declarations & module
 --------------------------------------------------------------------------------
 
-lowerDecl :: CtorMap -> Boolean -> Decl -> MFunc
-lowerDecl ctors isEntry (Decl d) =
+lowerDecl :: InputSet -> CtorMap -> Boolean -> Decl -> MFunc
+lowerDecl inputs ctors isEntry (Decl d) =
   let
     scheme = case d.sig of
       Just t -> splitArrow (Array.length d.params) t
@@ -429,7 +437,7 @@ lowerDecl ctors isEntry (Decl d) =
     build = do
       paramRegs <- traverse (const freshReg) d.params
       let env = Map.fromFoldable (Array.zip d.params paramRegs)
-      r <- lowerExpr ctors env d.body
+      r <- lowerExpr inputs ctors env d.body
       emit (ret r)
       s <- get
       pure
@@ -443,18 +451,23 @@ lowerDecl ctors isEntry (Decl d) =
   in
     evalState build { nextReg: 0, nextLabel: 0, nextEffect: 0, currentFunc: d.name, instrs: [] }
 
-lowerModule :: Module -> { funcs :: Array MFunc, entry :: Name }
-lowerModule (Module _ typeDecls decls) =
+inputMap :: Array InputDecl -> InputSet
+inputMap decls = Map.fromFoldable (map (\(InputDecl n t _) -> Tuple n t) decls)
+
+lowerModule :: Module -> { funcs :: Array MFunc, entry :: Name, inputs :: Array InputDecl }
+lowerModule (Module _ typeDecls inputDecls decls) =
   let
     ctors = ctorMap typeDecls
+    inputs = inputMap inputDecls
     entry = fromMaybe "main"
       ( map declNameOf (Array.find (\(Decl d) -> d.name == "main") decls)
           <|> map declNameOf (Array.head decls)
       )
     declNameOf (Decl d) = d.name
   in
-    { funcs: map (\d -> lowerDecl ctors (declNameOf d == entry) d) decls
+    { funcs: map (\d -> lowerDecl inputs ctors (declNameOf d == entry) d) decls
     , entry
+    , inputs: inputDecls
     }
 
 ctorMap :: Array TypeDecl -> CtorMap

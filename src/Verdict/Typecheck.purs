@@ -15,7 +15,7 @@ import Data.Maybe (Maybe(..), fromMaybe, isNothing)
 import Data.Set as Set
 import Data.Traversable (traverse)
 import Data.Tuple (Tuple(..), fst, snd)
-import Verdict.Syntax.AST (BinOp, CmpOp(..), Ctor, Decl(..), Expr(..), Lit(..), Module(..), Name, Pattern(..), SourcePos, Ty(..), TypeDecl(..), splitArrow, stripAt, typeArity)
+import Verdict.Syntax.AST (BinOp, CmpOp(..), Ctor, Decl(..), Expr(..), InputDecl(..), Lit(..), Module(..), Name, Pattern(..), SourcePos, Ty(..), TypeDecl(..), inputType, splitArrow, stripAt, typeArity)
 
 data TypeError
   = Located SourcePos TypeError
@@ -38,6 +38,9 @@ data TypeError
   | MatchWrongConstructor Name Name
   | MatchNonExhaustive Name
   | DataArityMismatch Name Int Int
+  | DuplicateInput Name
+  | InputConflictsWithDefinition Name
+  | NonLiteralInputDefault Name
 
 showTypeError :: TypeError -> String
 showTypeError = case _ of
@@ -67,6 +70,11 @@ showTypeError = case _ of
   MatchNonExhaustive n -> "match on '" <> n <> "' is not exhaustive"
   DataArityMismatch n want got ->
     "type '" <> n <> "' expects " <> show want <> " type argument(s) but got " <> show got
+  DuplicateInput n -> "duplicate input declaration '" <> n <> "'"
+  InputConflictsWithDefinition n ->
+    "input '" <> n <> "' conflicts with a top-level definition of the same name"
+  NonLiteralInputDefault n ->
+    "input '" <> n <> "' default must be a literal (constants only for now)"
 
 -- | Structured position + message for a type error (for editor diagnostics).
 -- | A non-located error reports at 1:1.
@@ -91,6 +99,7 @@ type DataInfo = { name :: Name, params :: Array Name, ctors :: Array Ctor }
 type CtorInfo = { parent :: Name, params :: Array Name, fields :: Array Ty }
 type TypeEnv =
   { globals :: Globals
+  , inputs :: Map Name Ty
   , dataTypes :: Map Name DataInfo
   , ctors :: Map Name CtorInfo
   }
@@ -364,17 +373,18 @@ infer env locals = case _ of
   EVar n -> case Map.lookup n locals of
     Just t | isArrow t -> Left (FunctionAsValue n)
     Just t -> Right t
-    Nothing -> case Map.lookup n env.globals of
-      Just sch
-        | Array.null sch.params -> Right sch.ret
-        | otherwise -> Left (FunctionAsValue n)
-      Nothing -> case Map.lookup n env.ctors of
-        Just ctor
-          | Array.null ctor.fields ->
-              -- nullary constructor: type args are unconstrained here
-              Right (TData ctor.parent (map (const TUnknown) ctor.params))
+    Nothing -> case Map.lookup n env.inputs of
+      Just t -> Right t
+      Nothing -> case Map.lookup n env.globals of
+        Just sch
+          | Array.null sch.params -> Right sch.ret
           | otherwise -> Left (FunctionAsValue n)
-        Nothing -> Left (UnknownName n)
+        Nothing -> case Map.lookup n env.ctors of
+          Just ctor
+            | Array.null ctor.fields ->
+                Right (TData ctor.parent (map (const TUnknown) ctor.params))
+            | otherwise -> Left (FunctionAsValue n)
+          Nothing -> Left (UnknownName n)
 
   EBin op a b -> do
     ta <- infer env locals a
@@ -409,23 +419,24 @@ infer env locals = case _ of
 
   ECall f args -> case inferIntrinsicCall env locals f args of
     Just result -> result
-    Nothing -> case Map.lookup f locals of
-      Just ty | isArrow ty -> callLocalArrow env locals f ty args
-      Just _ -> Left (NotAFunction f)
-      Nothing -> case Map.lookup f env.globals of
-        Nothing -> case Map.lookup f env.ctors of
-          Just ctor -> do
-            let want = Array.length ctor.fields
-            when (want /= Array.length args) (Left (ConstructorArityMismatch f want (Array.length args)))
-            -- instantiate the constructor's type params from the argument types
-            subst <- instantiate env locals ("argument to " <> f) ctor.fields args
-            Right (TData ctor.parent (map (\p -> fromMaybe TUnknown (Map.lookup p subst)) ctor.params))
-          Nothing -> Left (UnknownName f)
-        Just sch -> do
-          let want = Array.length sch.params
-          when (want /= Array.length args) (Left (CallArityMismatch f want (Array.length args)))
-          subst <- instantiateCall env locals f sch.params args
-          Right (applySubst subst sch.ret)
+    Nothing -> do
+      when (Map.member f env.inputs) (Left (NotAFunction f))
+      case Map.lookup f locals of
+        Just ty | isArrow ty -> callLocalArrow env locals f ty args
+        Just _ -> Left (NotAFunction f)
+        Nothing -> case Map.lookup f env.globals of
+          Nothing -> case Map.lookup f env.ctors of
+            Just ctor -> do
+              let want = Array.length ctor.fields
+              when (want /= Array.length args) (Left (ConstructorArityMismatch f want (Array.length args)))
+              subst <- instantiate env locals ("argument to " <> f) ctor.fields args
+              Right (TData ctor.parent (map (\p -> fromMaybe TUnknown (Map.lookup p subst)) ctor.params))
+            Nothing -> Left (UnknownName f)
+          Just sch -> do
+            let want = Array.length sch.params
+            when (want /= Array.length args) (Left (CallArityMismatch f want (Array.length args)))
+            subst <- instantiateCall env locals f sch.params args
+            Right (applySubst subst sch.ret)
 
   EBuiltin _ args -> do
     traverse_ (infer env locals) args
@@ -577,14 +588,41 @@ checkDecl env decl@(Decl d) = do
     (Left (Mismatch ("body of " <> d.name) sch.ret bodyTy))
 
 checkModule :: Module -> Either TypeError Unit
-checkModule (Module _ typeDecls decls) = do
+checkModule (Module _ typeDecls inputDecls decls) = do
   let dataTypes = buildDataTypes typeDecls
   let ctors = buildCtors typeDecls
+  inputs <- buildInputs inputDecls
+  traverse_ (validateTy dataTypes <<< inputType) inputDecls
+  traverse_ (checkInputDefault { globals: Map.empty, inputs, dataTypes, ctors }) inputDecls
+  traverse_ (checkInputConflict inputs) decls
   traverse_ (validateTypeDecl dataTypes) typeDecls
   globals <- buildGlobals
-  let env = { globals, dataTypes, ctors }
+  let env = { globals, inputs, dataTypes, ctors }
   traverse_ (checkDecl env) decls
   where
+  checkInputDefault env (InputDecl name t mdef) = case mdef of
+    Nothing -> Right unit
+    Just e -> case e of
+      ELit _ -> do
+        ty <- infer env Map.empty e
+        when (not (compatible t ty))
+          (Left (Mismatch ("default of input " <> name) t ty))
+      _ -> Left (NonLiteralInputDefault name)
+
+  buildInputs ins = case go Map.empty ins of
+    Left err -> Left err
+    Right m -> Right m
+    where
+    go acc = case _ of
+      [] -> Right acc
+      arr -> case Array.uncons arr of
+        Nothing -> Right acc
+        Just { head: InputDecl n t _, tail: rest } ->
+          if Map.member n acc then Left (DuplicateInput n)
+          else go (Map.insert n t acc) rest
+
+  checkInputConflict inputs (Decl d) =
+    when (Map.member d.name inputs) (Left (InputConflictsWithDefinition d.name))
   buildDataTypes tys = Map.fromFoldable
     (map (\(TypeDecl n ps cs) -> Tuple n { name: n, params: ps, ctors: cs }) tys)
 

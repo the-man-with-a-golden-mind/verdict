@@ -169,16 +169,32 @@ newtype Decl = Decl
 declName :: Decl -> Name
 declName (Decl d) = d.name
 
-data Module = Module Name (Array TypeDecl) (Array Decl)
+-- | A typed program input supplied at run time (`input name : Ty [= default]`).
+-- | A default expression makes the input optional (`required: false` in schema).
+data InputDecl = InputDecl Name Ty (Maybe Expr)
+
+inputName :: InputDecl -> Name
+inputName (InputDecl n _ _) = n
+
+inputType :: InputDecl -> Ty
+inputType (InputDecl _ t _) = t
+
+inputDefault :: InputDecl -> Maybe Expr
+inputDefault (InputDecl _ _ d) = d
+
+data Module = Module Name (Array TypeDecl) (Array InputDecl) (Array Decl)
 
 moduleDecls :: Module -> Array Decl
-moduleDecls (Module _ _ ds) = ds
+moduleDecls (Module _ _ _ ds) = ds
 
 moduleName :: Module -> Name
-moduleName (Module n _ _) = n
+moduleName (Module n _ _ _) = n
 
 moduleTypes :: Module -> Array TypeDecl
-moduleTypes (Module _ ts _) = ts
+moduleTypes (Module _ ts _ _) = ts
+
+moduleInputs :: Module -> Array InputDecl
+moduleInputs (Module _ _ ins _) = ins
 
 -- | A module's export list (`exposing (..)` or `exposing (a, B, …)`).
 data Exposing = ExposeAll | ExposeNames (Array Name)

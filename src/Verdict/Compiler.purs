@@ -10,14 +10,19 @@ module Verdict.Compiler
   , runJS
   , runProjectJS
   , runWithLogsJS
+  , runProjectWithLogsJS
   , signaturesJS
   , diagnosticsJS
+  , runWithInputsJS
+  , runProjectWithInputsJS
   , evalBindingsJS
+  , programInputsJS
   ) where
 
 import Prelude
 
 import Data.Argonaut.Core (Json, stringifyWithIndent)
+import Data.Argonaut.Encode (encodeJson)
 import Data.Array as Array
 import Data.Either (Either(..))
 import Data.Map (Map)
@@ -33,14 +38,20 @@ import Verdict.Core.Monomorph (monomorphize)
 import Verdict.Core.Opt (inlineNullaries, optimize)
 import Verdict.Core.Regalloc (allocate)
 import Verdict.FinVM.Emit (EmitFunc, assemble)
-import Verdict.FinVM.Types (ProgramVM, encodeProgramVM)
+import Verdict.FinVM.Types
+  ( InputSchemaEntry(..)
+  , ProgramVM
+  , encodeProgramVM
+  , inputSchemaDefaults
+  , inputSchemaEntries
+  )
 import Verdict.Parser (parseModuleFull, parseVerdict)
 import Verdict.Std.Link (link, linkAll)
 import Verdict.Std.Prelude (preludeSource)
 import Verdict.Std.Resolve (resolveProject)
 import Verdict.Syntax.AST (Decl(..), Module, Name, ParsedModule, moduleDecls)
 import Verdict.Typecheck (checkModule, locate, showTypeError)
-import Verdict.VM.Eval (encodeValueJson, runProgram, runProgramWithLogs)
+import Verdict.VM.Eval (decodeInputValues, encodeValueJson, runProgramWithInputs, runProgramWithLogsWithInputs)
 
 -- | The full pipeline, pure and IO-free, so it runs unchanged on Node and in
 -- | the browser:
@@ -91,7 +102,7 @@ finish userMod =
             inlined = inlineNullaries lowered.funcs lowered.entry
             emitFuncs = map (toEmitFunc <<< optimize) inlined
           in
-            Right (assemble emitFuncs lowered.entry)
+            Right (assemble emitFuncs lowered.entry lowered.inputs)
 
 -- | A build for editor introspection: keeps EVERY top-level binding (so each can
 -- | be evaluated independently) and skips nullary inlining (so a value binding
@@ -110,17 +121,30 @@ compileBindings src = case parseVerdict src of
             lowered = lowerModule (monomorphize mod)
             emitFuncs = map (toEmitFunc <<< optimize) lowered.funcs
           in
-            Right (assemble emitFuncs lowered.entry)
+            Right (assemble emitFuncs lowered.entry lowered.inputs)
 
 compileJson :: String -> Either String Json
 compileJson src = map encodeProgramVM (compileProgram src)
 
 runToJson :: String -> Either String Json
-runToJson src = map encodeValueJson (compileProgram src >>= runProgram)
+runToJson src = runToJsonWithInputs src FO.empty
+
+runToJsonWithInputs :: String -> FO.Object Json -> Either String Json
+runToJsonWithInputs src valuesJson = do
+  values <- decodeInputValues valuesJson
+  prog <- compileProgram src
+  v <- runProgramWithInputs prog values
+  pure (encodeValueJson v)
 
 runProjectToJson :: FO.Object String -> Name -> Either String Json
-runProjectToJson sources entry =
-  map encodeValueJson (compileProject sources entry >>= runProgram)
+runProjectToJson sources entry = runProjectToJsonWithInputs sources entry FO.empty
+
+runProjectToJsonWithInputs :: FO.Object String -> Name -> FO.Object Json -> Either String Json
+runProjectToJsonWithInputs sources entry valuesJson = do
+  values <- decodeInputValues valuesJson
+  prog <- compileProject sources entry
+  v <- runProgramWithInputs prog values
+  pure (encodeValueJson v)
 
 -- | optimize → allocate → package the per-function record the assembler wants.
 toEmitFunc :: MFunc -> EmitFunc
@@ -152,15 +176,31 @@ compileProjectJS sources entry =
     Right out -> { ok: true, output: out, error: "" }
     Left err -> { ok: false, output: "", error: err }
 
-runJS :: String -> { ok :: Boolean, output :: String, error :: String }
-runJS src = case runToJson src of
-  Right json -> { ok: true, output: stringifyWithIndent 2 json, error: "" }
-  Left err -> { ok: false, output: "", error: err }
+runJS :: String -> FO.Object Json -> { ok :: Boolean, output :: String, error :: String }
+runJS = runWithInputsJS
 
-runProjectJS :: FO.Object String -> String -> { ok :: Boolean, output :: String, error :: String }
-runProjectJS sources entry = case runProjectToJson sources entry of
-  Right json -> { ok: true, output: stringifyWithIndent 2 json, error: "" }
-  Left err -> { ok: false, output: "", error: err }
+runProjectJS :: FO.Object String -> String -> FO.Object Json -> { ok :: Boolean, output :: String, error :: String }
+runProjectJS = runProjectWithInputsJS
+
+runWithInputsJS :: String -> FO.Object Json -> { ok :: Boolean, output :: String, error :: String }
+runWithInputsJS src valuesJson =
+  case compileProgram src of
+    Left err -> { ok: false, output: "", error: err }
+    Right prog -> case decodeInputValues valuesJson of
+      Left err -> { ok: false, output: "", error: err }
+      Right values -> case runProgramWithInputs prog values of
+        Right v -> { ok: true, output: stringifyWithIndent 2 (encodeValueJson v), error: "" }
+        Left err -> { ok: false, output: "", error: err }
+
+runProjectWithInputsJS :: FO.Object String -> String -> FO.Object Json -> { ok :: Boolean, output :: String, error :: String }
+runProjectWithInputsJS sources entry valuesJson =
+  case compileProject sources entry of
+    Left err -> { ok: false, output: "", error: err }
+    Right prog -> case decodeInputValues valuesJson of
+      Left err -> { ok: false, output: "", error: err }
+      Right values -> case runProgramWithInputs prog values of
+        Right v -> { ok: true, output: stringifyWithIndent 2 (encodeValueJson v), error: "" }
+        Left err -> { ok: false, output: "", error: err }
 
 --------------------------------------------------------------------------------
 -- Editor integration: the entry points the playground/editor calls on the
@@ -169,14 +209,31 @@ runProjectJS sources entry = case runProjectToJson sources entry of
 --------------------------------------------------------------------------------
 
 -- | Run a program on the reference VM and capture its `sys.log` output.
-runWithLogsJS :: String -> { ok :: Boolean, value :: String, error :: String, logs :: Array String }
-runWithLogsJS src = case compileProgram src of
+-- | Pass `{}` when no runtime overrides are needed (defaults still apply).
+runWithLogsJS :: String -> FO.Object Json -> { ok :: Boolean, value :: String, error :: String, logs :: Array String }
+runWithLogsJS src valuesJson = case compileProgram src of
   Left err -> { ok: false, value: "", error: err, logs: [] }
   Right prog ->
-    let r = runProgramWithLogs prog
-    in case r.result of
-      Right v -> { ok: true, value: show v, error: "", logs: r.logs }
-      Left err -> { ok: false, value: "", error: err, logs: r.logs }
+    case decodeInputValues valuesJson of
+      Left err -> { ok: false, value: "", error: err, logs: [] }
+      Right values ->
+        let r = runProgramWithLogsWithInputs prog values
+        in case r.result of
+          Right v -> { ok: true, value: show v, error: "", logs: r.logs }
+          Left err -> { ok: false, value: "", error: err, logs: r.logs }
+
+runProjectWithLogsJS :: FO.Object String -> String -> FO.Object Json -> { ok :: Boolean, value :: String, error :: String, logs :: Array String }
+runProjectWithLogsJS sources entry valuesJson =
+  case compileProject sources entry of
+    Left err -> { ok: false, value: "", error: err, logs: [] }
+    Right prog ->
+      case decodeInputValues valuesJson of
+        Left err -> { ok: false, value: "", error: err, logs: [] }
+        Right values ->
+          let r = runProgramWithLogsWithInputs prog values
+          in case r.result of
+            Right v -> { ok: true, value: show v, error: "", logs: r.logs }
+            Left err -> { ok: false, value: "", error: err, logs: r.logs }
 
 -- | The type signature of each top-level binding (user source + prelude), so the
 -- | editor can show it on hover.
@@ -206,17 +263,47 @@ diagnosticsJS src = case parseVerdict src of
 
 -- | Evaluate every nullary top-level binding on the reference VM (editor notebook
 -- | inline results). Bindings unreachable from the entry are skipped.
-evalBindingsJS :: String -> Array { name :: String, ok :: Boolean, value :: String, error :: String }
-evalBindingsJS src = case parseVerdict src, compileBindings src of
-  Right userMod, Right prog -> Array.mapMaybe (evalBinding prog) (nullary userMod)
-  _, _ -> []
+-- | Pass `{}` to rely on compiled input defaults only.
+evalBindingsJS :: String -> FO.Object Json -> Array { name :: String, ok :: Boolean, value :: String, error :: String }
+evalBindingsJS src valuesJson =
+  case decodeInputValues valuesJson of
+    Left err -> [ { name: "<inputs>", ok: false, value: "", error: err } ]
+    Right values ->
+      case parseVerdict src, compileBindings src of
+        Right userMod, Right prog -> Array.mapMaybe (evalBinding values prog) (nullary userMod)
+        _, _ -> []
   where
   nullary mod = Array.mapMaybe
     (\(Decl d) -> if Array.null d.params then Just d.name else Nothing)
     (moduleDecls mod)
-  evalBinding prog name =
+  evalBinding values prog name =
     if FO.member name prog.functions then Just
-      case runProgram (prog { entrypoint = name }) of
+      case runProgramWithInputs (prog { entrypoint = name }) values of
         Right v -> { name, ok: true, value: show v, error: "" }
         Left err -> { name, ok: false, value: "", error: err }
     else Nothing
+
+type InputSchemaJS =
+  { name :: String
+  , type :: String
+  , required :: Boolean
+  }
+
+-- | Introspect declared program inputs for editors and hosts (schema + defaults).
+programInputsJS :: String -> { ok :: Boolean, schema :: Array InputSchemaJS, defaults :: FO.Object Json, error :: String }
+programInputsJS src = case compileProgram src of
+  Left err -> { ok: false, schema: [], defaults: FO.empty, error: err }
+  Right prog -> case prog.inputs of
+    Nothing -> { ok: true, schema: [], defaults: FO.empty, error: "" }
+    Just ins ->
+      { ok: true
+      , schema: map schemaEntry (inputSchemaEntries ins)
+      , defaults: map encodeJson (inputSchemaDefaults ins)
+      , error: ""
+      }
+  where
+  schemaEntry (InputSchemaEntry e) =
+    { name: e.name
+    , type: e.typeName
+    , required: e.required
+    }

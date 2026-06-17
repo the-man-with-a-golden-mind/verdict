@@ -9,7 +9,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..), fromMaybe)
 import Data.String.Common (joinWith)
 import Data.Tuple (Tuple(..), snd)
-import Verdict.Syntax.AST (Decl(..), Expr(..), Module(..), Name, Pattern(..), Ty(..), moduleDecls, moduleName, moduleTypes, splitArrow, stripAt)
+import Verdict.Syntax.AST (Decl(..), Expr(..), Module(..), Name, Pattern(..), Ty(..), moduleDecls, moduleInputs, moduleName, moduleTypes, splitArrow, stripAt)
 
 type FnInfo =
   { name :: Name
@@ -45,7 +45,7 @@ monomorphize mod =
       }
     done = processAll { generated: Map.empty, queue: [ initial ], steps: 0 }
   in
-    Module (moduleName mod) (moduleTypes mod) (map snd (Map.toUnfoldable done.generated :: Array (Tuple Name Decl)))
+    Module (moduleName mod) (moduleTypes mod) (moduleInputs mod) (map snd (Map.toUnfoldable done.generated :: Array (Tuple Name Decl)))
   where
   infos :: Map Name FnInfo
   infos = Map.fromFoldable

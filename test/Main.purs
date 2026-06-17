@@ -2,7 +2,7 @@ module Test.Main where
 
 import Prelude
 
-import Data.Array (all, drop, length)
+import Data.Array (all, any, drop, head, length)
 import Data.Either (Either(..), either, isRight)
 import Data.Foldable (sum)
 import Data.Int as Int
@@ -16,9 +16,10 @@ import Foreign.Object as FO
 import Node.Encoding (Encoding(..))
 import Node.FS.Sync (readTextFile)
 import Node.Process (setExitCode)
+import Data.Map as Map
 import Data.Tuple (Tuple(..))
-import Verdict.Compiler (compile, compileJS, compileProgram, compileProject)
-import Verdict.VM.Eval (runProgram)
+import Verdict.Compiler (compile, compileJS, compileProgram, compileProject, evalBindingsJS, programInputsJS)
+import Verdict.VM.Eval (Value(..), runProgram, runProgramWithInputs, runProgramWithLogsWithInputs)
 
 -- Dependency-free assertion harness.
 
@@ -72,6 +73,34 @@ evalsTo :: String -> String -> Boolean
 evalsTo src expected = case compileProgram src >>= runProgram of
   Right v -> show v == expected
   Left _ -> false
+
+evalsWithInputs :: String -> Array (Tuple String Value) -> String -> Boolean
+evalsWithInputs src pairs expected =
+  case compileProgram src >>= flip runProgramWithInputs (Map.fromFoldable pairs) of
+    Right v -> show v == expected
+    Left _ -> false
+
+runInputError :: String -> Array (Tuple String Value) -> String -> Boolean
+runInputError src pairs needle =
+  case compileProgram src >>= flip runProgramWithInputs (Map.fromFoldable pairs) of
+    Left msg -> contains (Pattern needle) msg
+    Right _ -> false
+
+evalsProjectWithInputs :: Array (Tuple String String) -> String -> Array (Tuple String Value) -> String -> Boolean
+evalsProjectWithInputs mods entry pairs expected =
+  case compileProject (FO.fromFoldable mods) entry >>= flip runProgramWithInputs (Map.fromFoldable pairs) of
+    Right v -> show v == expected
+    Left _ -> false
+
+runLogsWithInputs :: String -> Array (Tuple String Value) -> String -> Boolean
+runLogsWithInputs src pairs expected =
+  case compileProgram src of
+    Left _ -> false
+    Right prog ->
+      let r = runProgramWithLogsWithInputs prog (Map.fromFoldable pairs)
+      in case r.result of
+        Right v -> show v == expected
+        Left _ -> false
 
 capsOf :: String -> Array String
 capsOf src = either (const [ "<error>" ]) _.capabilities (compileProgram src)
@@ -963,6 +992,135 @@ main = do
     (hasEffectProtocol (m "main : Int\nmain = match dbGetOpt(\"users\", \"no-such-id\") { Some r -> 1, None -> 0 }") "db.get")
   assert fails "user can match the generic prelude Option type"
     (evalsTo (m "main : Int\nmain = match Some(1) { Some v -> v, None -> 0 }") "1")
+
+  -- Program inputs: typed parameters supplied at run time by the host.
+  log "  -- program inputs --"
+  let inputProg =
+        m
+          ( "input signalThreshold : Int\n"
+              <> "input assetsCsv : String\n"
+              <> "main : Int\n"
+              <> "main = signalThreshold + strLength(assetsCsv)"
+          )
+  assert fails "input reference lowers to input.get@1"
+    (hasAll inputProg [ "input.get@1", "\"signalThreshold\"", "\"CALL_BUILTIN\"" ])
+  assert fails "compiled program emits inputs.schema"
+    ( hasAll inputProg
+        [ "\"inputs\""
+        , "\"schema\""
+        , "\"signalThreshold\""
+        , "\"type\": \"Int\""
+        , "\"assetsCsv\""
+        , "\"type\": \"String\""
+        , "\"required\": true"
+        ]
+        && hasNone inputProg [ "\"values\"", "\"encrypted\"" ]
+    )
+  assert fails "input program infers [input] capability"
+    (capsOf inputProg == [ "input", "str" ])
+  assert fails "undeclared input reference is a type error"
+    (errContains (m "main : Int\nmain = missingInput") "unknown name")
+  assert fails "input used at wrong type is a type error"
+    (errContains
+       (m "input signalThreshold : Int\nmain : String\nmain = signalThreshold")
+       "type mismatch")
+  assert fails "input name cannot shadow a top-level definition"
+    (errContains
+       (m "input main : Int\nmain : Int\nmain = 1")
+       "conflicts with a top-level definition")
+  assert fails "programs without inputs compile unchanged (no inputs field)"
+    (hasNone (m "main : Int\nmain = 1") [ "\"inputs\"" ])
+  assert fails "input program runs when values are supplied -> 7"
+    ( evalsWithInputs
+        inputProg
+        [ Tuple "signalThreshold" (VInt "5"), Tuple "assetsCsv" (VString "ab") ]
+        "7"
+    )
+  assert fails "run without values fails when inputs are declared"
+    (runInputError inputProg [] "missing required input")
+  assert fails "unknown runtime input key is rejected"
+    (runInputError inputProg [ Tuple "extra" (VInt "1") ] "unknown input")
+  assert fails "runtime type mismatch is rejected"
+    (runInputError
+       inputProg
+       [ Tuple "signalThreshold" (VString "nope"), Tuple "assetsCsv" (VString "ab") ]
+       "has type Int")
+  assert fails "Bool input round-trips through input.get@1"
+    ( evalsWithInputs
+        (m "input enabled : Bool\nmain : Int\nmain = if enabled then 1 else 0")
+        [ Tuple "enabled" (VBool true) ]
+        "1"
+    )
+  assert fails "conformance inputs case runs on reference VM -> 42"
+    ( evalsWithInputs
+        ( "module Main exposing (main)\n"
+            <> "input threshold : Int\n"
+            <> "main : Int\n"
+            <> "main = threshold + 1\n"
+        )
+        [ Tuple "threshold" (VInt "41") ]
+        "42"
+    )
+  assert fails "optional input uses compiled default when value omitted -> 5"
+    ( evalsWithInputs
+        (m "input limit : Int = 5\nmain : Int\nmain = limit")
+        []
+        "5"
+    )
+  assert fails "optional input runtime value overrides default -> 9"
+    ( evalsWithInputs
+        (m "input limit : Int = 5\nmain : Int\nmain = limit")
+        [ Tuple "limit" (VInt "9") ]
+        "9"
+    )
+  assert fails "optional input emits required false and defaults"
+    ( hasAll
+        (m "input limit : Int = 5\nmain : Int\nmain = limit")
+        [ "\"required\": false", "\"defaults\"", "\"limit\"" ]
+    )
+  assert fails "multi-file project merges inputs across modules -> 11"
+    ( evalsProjectWithInputs
+        [ Tuple "Config"
+            ( "module Config exposing (stub)\n"
+                <> "input threshold : Int = 10\n"
+                <> "stub : Int\n"
+                <> "stub = 1\n"
+            )
+        , Tuple "Main"
+            ( "module Main exposing (main)\n"
+                <> "import Config exposing (stub)\n"
+                <> "main : Int\n"
+                <> "main = threshold + 1\n"
+            )
+        ]
+        "Main"
+        []
+        "11"
+    )
+  assert fails "runWithLogsJS accepts runtime input overrides"
+    (runLogsWithInputs
+       (m "input n : Int\nmain : Int\nmain = n")
+       [ Tuple "n" (VInt "99") ]
+       "99")
+  assert fails "programInputsJS exposes schema and defaults"
+    ( let info = programInputsJS (m "input limit : Int = 5\nmain : Int\nmain = limit")
+      in info.ok
+        && ( case head info.schema of
+              Just entry -> entry.name == "limit" && entry.required == false
+              Nothing -> false
+           )
+        && FO.member "limit" info.defaults
+    )
+  assert fails "evalBindingsJS applies compiled input defaults to nullary bindings"
+    ( let rs = evalBindingsJS (m "input base : Int = 2\nextra : Int\nextra = base + 1\nmain : Int\nmain = extra") FO.empty
+      in any (\r -> r.name == "extra" && r.ok && r.value == "3") rs
+    )
+  assert fails "prelude inputInt reads declared input by name -> 7"
+    ( evalsWithInputs
+        (m "input x : Int\nmain : Int\nmain = inputInt(\"x\")")
+        [ Tuple "x" (VInt "7") ]
+        "7"
+    )
 
   -- Parametric polymorphism (generics): type variables in functions resolve at
   -- call sites, and generic data types carry their payload type into `match`.

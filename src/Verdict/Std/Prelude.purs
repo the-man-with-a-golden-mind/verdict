@@ -31,6 +31,20 @@ or a b = builtin("logic.or@1", a, b)
 not : Bool -> Bool
 not b = builtin("logic.not@1", b)
 
+-- Program inputs (prefer `input name : Ty` declarations; dynamic access below)
+
+inputGet : String -> Json
+inputGet name = builtin("input.get@1", name)
+
+inputInt : String -> Int
+inputInt name = builtin("input.get@1", name)
+
+inputBool : String -> Bool
+inputBool name = builtin("input.get@1", name)
+
+inputString : String -> String
+inputString name = builtin("input.get@1", name)
+
 -- BigInt math ----------------------------------------------------------------
 
 modPow : Int -> Int -> Int -> Int

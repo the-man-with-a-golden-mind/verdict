@@ -14,7 +14,7 @@ import Data.Maybe (Maybe(..))
 import Data.Set (Set)
 import Data.Set as Set
 import Data.Tuple (Tuple(..), snd)
-import Verdict.Syntax.AST (Decl(..), Expr(..), Module(..), Name, Pattern(..), TypeDecl(..), declName, moduleDecls, moduleName, moduleTypes)
+import Verdict.Syntax.AST (Decl(..), Expr(..), Module(..), Name, Pattern(..), TypeDecl(..), declName, moduleDecls, moduleInputs, moduleName, moduleTypes)
 
 -- | Names referenced by an expression (potential function calls / value refs),
 -- | minus the given locally-bound names (params, let bindings) which shadow.
@@ -118,7 +118,7 @@ linkWith roots userMod preludeMod =
     keep = Array.foldl (\acc n -> acc <> reachable ctorSet declMap n) Set.empty (roots userDecls)
     kept = Array.filter (\d -> Set.member (declName d) keep) allDecls
   in
-    Module (moduleName userMod) allTypes kept
+    Module (moduleName userMod) allTypes (moduleInputs userMod) kept
 
 typeName :: TypeDecl -> Name
 typeName (TypeDecl n _ _) = n

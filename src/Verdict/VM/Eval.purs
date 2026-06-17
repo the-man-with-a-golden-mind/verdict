@@ -8,9 +8,13 @@
 -- | scheduling for Verdict's process primitives.
 module Verdict.VM.Eval
   ( Value(..)
+  , decodeInputValues
+  , decodeValueJson
   , encodeValueJson
   , runProgram
+  , runProgramWithInputs
   , runProgramWithLogs
+  , runProgramWithLogsWithInputs
   ) where
 
 import Prelude
@@ -25,7 +29,7 @@ import Data.Argonaut.Encode.Combinators ((:=), (~>))
 import Data.Argonaut.Parser (jsonParser)
 import Data.Array as Array
 import Data.Either (Either(..))
-import Data.Foldable (all, any, foldl)
+import Data.Foldable (all, any, foldl, traverse_)
 import Data.FoldableWithIndex (foldlWithIndex)
 import Data.Int as Int
 import Data.Map (Map)
@@ -34,13 +38,26 @@ import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.String.Common (joinWith, replaceAll, split, toLower, toUpper, trim)
 import Data.String.CodeUnits as SCU
 import Data.String.Pattern (Pattern(..), Replacement(..))
-import Data.Tuple (Tuple(..), fst)
+import Data.Set as Set
+import Data.Traversable as TR
+import Data.Tuple (Tuple(..))
 import Foreign.Object as FO
 import Verdict.Eval.BigInt (addStr, cmpStr, divFloorStr, gcdStr, modInvStr, modPowStr, modStr, mulStr, normalizeStr, powStr, scale10, sqrtFloorStr, subStr)
 import Verdict.Eval.Rational as Rational
 import Verdict.Eval.Regex as Regex
 import Verdict.Eval.Series as Series
-import Verdict.FinVM.Types (FunctionVM, InstructionVM(..), ProgramVM, ValueVM(..))
+import Verdict.FinVM.Types
+  ( FunctionVM
+  , InputsVM(..)
+  , InstructionVM(..)
+  , ProgramVM
+  , ValueVM(..)
+  , inputSchemaDefaults
+  , inputSchemaEntries
+  , inputSchemaName
+  , inputSchemaRequired
+  , inputSchemaTypeName
+  )
 
 -- | Runtime values.
 data Value
@@ -74,11 +91,190 @@ encodeValueJson = case _ of
     "record" := J.fromObject (FO.fromFoldable (map (\(Tuple k v) -> Tuple k (encodeValueJson v)) fs))
       ~> J.jsonEmptyObject
 
+-- | Decode a tagless FinVM value object (inverse of `encodeValueJson`).
+decodeValueJson :: Json -> Either String Value
+decodeValueJson json = case J.toObject json of
+  Nothing -> Left "input value must be a JSON object"
+  Just obj -> decodeTaggedValue obj
+
+decodeInputValues :: FO.Object Json -> Either String (Map String Value)
+decodeInputValues obj =
+  let entries = FO.toUnfoldable obj :: Array (Tuple String Json)
+  in Map.fromFoldable <$> TR.traverse decodePair entries
+  where
+  decodePair (Tuple name json) = Tuple name <$> decodeValueJson json
+
+decodeTaggedValue :: FO.Object Json -> Either String Value
+decodeTaggedValue obj = case FO.keys obj of
+  [ "int" ] -> decodeFieldString obj "int" VInt
+  [ "bool" ] -> decodeFieldBool obj "bool" VBool
+  [ "string" ] -> decodeFieldString obj "string" VString
+  [ "fixed" ] -> do
+    inner <- decodeFieldObject obj "fixed"
+    value <- decodeFieldRawString inner "value"
+    scale <- decodeFieldInt inner "scale"
+    pure (VFixed value scale)
+  [ "rational" ] -> do
+    inner <- decodeFieldObject obj "rational"
+    num <- decodeFieldRawString inner "numerator"
+    den <- decodeFieldRawString inner "denominator"
+    pure (VRational num den)
+  [ "list" ] -> do
+    arr <- decodeFieldArray obj "list"
+    xs <- TR.traverse decodeValueJson arr
+    pure (VList xs)
+  [ "record" ] -> do
+    inner <- decodeFieldObject obj "record"
+    fs <- TR.traverse (\(Tuple k v) -> Tuple k <$> decodeValueJson v) (FO.toUnfoldable inner)
+    pure (VRecord fs)
+  [] -> Left "input value object has no tag field"
+  keys -> Left ("unsupported value tag(s): " <> joinWith "," keys)
+
+decodeFieldString :: FO.Object Json -> String -> (String -> Value) -> Either String Value
+decodeFieldString obj key mk = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toString j of
+    Nothing -> Left ("field '" <> key <> "' must be a string")
+    Just s -> Right (mk s)
+
+decodeFieldRawString :: FO.Object Json -> String -> Either String String
+decodeFieldRawString obj key = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toString j of
+    Nothing -> Left ("field '" <> key <> "' must be a string")
+    Just s -> Right s
+
+decodeFieldBool :: FO.Object Json -> String -> (Boolean -> Value) -> Either String Value
+decodeFieldBool obj key mk = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toBoolean j of
+    Nothing -> Left ("field '" <> key <> "' must be a boolean")
+    Just b -> Right (mk b)
+
+decodeFieldInt :: FO.Object Json -> String -> Either String Int
+decodeFieldInt obj key = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toNumber j of
+    Nothing -> Left ("field '" <> key <> "' must be a number")
+    Just n -> case Int.fromNumber n of
+      Nothing -> Left ("field '" <> key <> "' must be an integer")
+      Just i -> Right i
+
+decodeFieldObject :: FO.Object Json -> String -> Either String (FO.Object Json)
+decodeFieldObject obj key = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toObject j of
+    Nothing -> Left ("field '" <> key <> "' must be an object")
+    Just o -> Right o
+
+decodeFieldArray :: FO.Object Json -> String -> Either String (Array Json)
+decodeFieldArray obj key = case FO.lookup key obj of
+  Nothing -> Left ("missing field '" <> key <> "'")
+  Just j -> case J.toArray j of
+    Nothing -> Left ("field '" <> key <> "' must be an array")
+    Just xs -> Right xs
+
+bindProgramInputs :: Maybe InputsVM -> Map String Value -> Either String (Map String Value)
+bindProgramInputs Nothing values =
+  if Map.isEmpty values then Right Map.empty
+  else Left "program declares no inputs but runtime values were supplied"
+bindProgramInputs (Just schemaBox) values = do
+  let schema = inputSchemaEntries schemaBox
+  let defaults =
+        Map.fromFoldable
+          ( map (\(Tuple n vm) -> Tuple n (fromVM vm))
+              (FO.toUnfoldable (inputSchemaDefaults schemaBox) :: Array (Tuple String ValueVM))
+          )
+  -- Runtime values override compiled defaults (`Map.union` keeps the first map on conflict).
+  let merged = Map.union values defaults
+  let allowed = Set.fromFoldable (map inputSchemaName schema)
+  case Array.find (\n -> not (Set.member n allowed)) (Set.toUnfoldable (Map.keys values)) of
+    Just unknown -> Left ("unknown input '" <> unknown <> "'")
+    Nothing -> do
+      traverse_
+        ( \entry ->
+            when (inputSchemaRequired entry && not (Map.member (inputSchemaName entry) merged))
+              (Left ("missing required input '" <> inputSchemaName entry <> "'"))
+        )
+        schema
+      traverse_
+        ( \entry -> case Map.lookup (inputSchemaName entry) merged of
+            Nothing -> Right unit
+            Just v ->
+              if valueMatchesTypeName (inputSchemaTypeName entry) v then Right unit
+              else
+                Left
+                  ( "input '"
+                      <> inputSchemaName entry
+                      <> "' has type "
+                      <> inputSchemaTypeName entry
+                      <> " but got "
+                      <> valueKind v
+                  )
+        )
+        schema
+      Right merged
+
+valueKind :: Value -> String
+valueKind = case _ of
+  VUnit -> "Unit"
+  VInt _ -> "Int"
+  VFixed _ _ -> "Fixed"
+  VRational _ _ -> "Rational"
+  VBool _ -> "Bool"
+  VString _ -> "String"
+  VList _ -> "List"
+  VRecord _ -> "Record"
+
+valueMatchesTypeName :: String -> Value -> Boolean
+valueMatchesTypeName tn v = case tn of
+  "Int" -> isVInt v
+  "Fixed" -> isVFixed v
+  "Rational" -> isVRational v
+  "Bool" -> isVBool v
+  "String" -> isVString v
+  "Unit" -> isVUnit v
+  "Pid" -> isVString v
+  "Json" -> true
+  "Record" -> isVRecord v
+  _ | isListTypeName tn -> matchListType (listElemTypeName tn) v
+  _ -> isUserTypeName tn v
+  where
+  isVInt (VInt _) = true
+  isVInt _ = false
+  isVFixed (VFixed _ _) = true
+  isVFixed _ = false
+  isVRational (VRational _ _) = true
+  isVRational _ = false
+  isVBool (VBool _) = true
+  isVBool _ = false
+  isVString (VString _) = true
+  isVString _ = false
+  isVUnit VUnit = true
+  isVUnit _ = false
+  isVRecord (VRecord _) = true
+  isVRecord _ = false
+
+isListTypeName :: String -> Boolean
+isListTypeName tn = SCU.take 5 tn == "List "
+
+listElemTypeName :: String -> String
+listElemTypeName tn = SCU.drop 5 tn
+
+matchListType :: String -> Value -> Boolean
+matchListType elemTy (VList xs) = all (valueMatchesTypeName elemTy) xs
+matchListType _ _ = false
+
+isUserTypeName :: String -> Value -> Boolean
+isUserTypeName _ (VRecord _) = true
+isUserTypeName _ _ = false
+
 type World =
   { db :: Map String (Map String Value)
   , cache :: Map String Value
   , files :: Map String String
   , logs :: Array String
+  , inputs :: Map String Value
   , nextId :: Int
   , steps :: Int
   , procs :: Map String Process
@@ -97,6 +293,7 @@ initWorld =
   , cache: Map.empty
   , files: Map.empty
   , logs: []
+  , inputs: Map.empty
   , nextId: 0
   , steps: 0
   , procs: Map.empty
@@ -108,28 +305,38 @@ fuel :: Int
 fuel = 5_000_000
 
 runProgram :: ProgramVM -> Either String Value
-runProgram = _.result <<< runProgramWithLogs
+runProgram prog = runProgramWithInputs prog Map.empty
+
+runProgramWithInputs :: ProgramVM -> Map String Value -> Either String Value
+runProgramWithInputs prog values = _.result $ runProgramWithLogsWithInputs prog values
 
 -- | Like `runProgram` but also returns any `sys.log` output captured in the
 -- | world (logs are available on success; an aborted run returns no logs).
 runProgramWithLogs :: ProgramVM -> { result :: Either String Value, logs :: Array String }
-runProgramWithLogs prog = case FO.lookup prog.entrypoint prog.functions of
+runProgramWithLogs prog = runProgramWithLogsWithInputs prog Map.empty
+
+runProgramWithLogsWithInputs :: ProgramVM -> Map String Value -> { result :: Either String Value, logs :: Array String }
+runProgramWithLogsWithInputs prog values = case FO.lookup prog.entrypoint prog.functions of
   Nothing -> { result: Left ("no entrypoint: " <> prog.entrypoint), logs: [] }
   Just fn ->
-    let
-      p0 =
-        { frame: initialFrame fn []
-        , mailbox: []
-        , blocked: false
-        }
-      world0 = initWorld
-        { procs = Map.singleton "main" p0
-        , ready = [ "main" ]
-        , nextPid = 0
-        }
-    in case runStateT (schedule prog) world0 of
+    case bindProgramInputs prog.inputs values of
       Left e -> { result: Left e, logs: [] }
-      Right (Tuple v w) -> { result: Right v, logs: w.logs }
+      Right bound ->
+        let
+          p0 =
+            { frame: initialFrame fn []
+            , mailbox: []
+            , blocked: false
+            }
+          world0 = initWorld
+            { inputs = bound
+            , procs = Map.singleton "main" p0
+            , ready = [ "main" ]
+            , nextPid = 0
+            }
+        in case runStateT (schedule prog) world0 of
+          Left e -> { result: Left e, logs: [] }
+          Right (Tuple v w) -> { result: Right v, logs: w.logs }
 
 fromVM :: ValueVM -> Value
 fromVM = case _ of
@@ -541,6 +748,12 @@ knownEffectArgs typ payload = case payload of
 
 callBuiltin :: String -> Array Value -> Eval Value
 callBuiltin bid args = case bid, args of
+  "input.get@1", [ VString name ] -> do
+    w <- get
+    case Map.lookup name w.inputs of
+      Just v -> pure v
+      Nothing -> err ("input.get: no value bound for '" <> name <> "'")
+
   "logic.and@1", [ VBool a, VBool b ] -> pure (VBool (a && b))
   "logic.or@1", [ VBool a, VBool b ] -> pure (VBool (a || b))
   "logic.not@1", [ VBool a ] -> pure (VBool (not a))

@@ -14,8 +14,9 @@ import Data.Tuple (Tuple(..))
 import Foreign.Object as FO
 import Verdict.Core.MIR (MInstr(..))
 import Verdict.Eval.Rational as Rational
-import Verdict.FinVM.Types (FunctionVM, InstructionVM(..), ProgramVM, TypeVM(..), ValueVM(..))
-import Verdict.Syntax.AST (BinOp(..), CmpOp(..), Lit(..), Ty(..))
+import Verdict.FinVM.Types (FunctionVM, InputSchemaEntry(..), InputsVM(..), InstructionVM(..), ProgramVM, TypeVM(..), ValueVM(..))
+import Data.Maybe (Maybe(..), isNothing)
+import Verdict.Syntax.AST (BinOp(..), CmpOp(..), Expr(..), InputDecl(..), Lit(..), Ty(..))
 
 type EmitFunc =
   { name :: String
@@ -123,8 +124,8 @@ convFunc f = do
     , proof: { isInvariant: false }
     }
 
-assemble :: Array EmitFunc -> String -> ProgramVM
-assemble funcs entry =
+assemble :: Array EmitFunc -> String -> Array InputDecl -> ProgramVM
+assemble funcs entry inputDecls =
   let
     Tuple vmFuncs pool = runState (traverse convFunc funcs) []
   in
@@ -141,7 +142,50 @@ assemble funcs entry =
     -- FinVM defaults maxSteps to 10000, which deep recursion blows past; emit a
     -- generous bound (deterministic programs still halt; this only caps runaways).
     , limits: { maxSteps: 100000000 }
+    , inputs: inputsSchema inputDecls
     }
+
+inputsSchema :: Array InputDecl -> Maybe InputsVM
+inputsSchema decls =
+  if Array.null decls then Nothing
+  else
+    Just
+      ( InputsVM
+          { schema:
+              map
+                (\(InputDecl n t def) ->
+                  InputSchemaEntry
+                    { name: n
+                    , typeName: tyToSchemaName t
+                    , required: isNothing def
+                    }
+                )
+                decls
+          , defaults: inputDefaults decls
+          }
+      )
+
+inputDefaults :: Array InputDecl -> FO.Object ValueVM
+inputDefaults decls = FO.fromFoldable (Array.mapMaybe defaultEntry decls)
+  where
+  defaultEntry (InputDecl n _ (Just (ELit lit))) = Just (Tuple n (litToValue lit))
+  defaultEntry _ = Nothing
+
+tyToSchemaName :: Ty -> String
+tyToSchemaName = case _ of
+  TInt -> "Int"
+  TFixed -> "Fixed"
+  TRational -> "Rational"
+  TBool -> "Bool"
+  TString -> "String"
+  TUnit -> "Unit"
+  TPid -> "Pid"
+  TList t -> "List " <> tyToSchemaName t
+  TRecord _ -> "Record"
+  TData n _ -> n
+  TVar a -> a
+  TArrow _ _ -> "Function"
+  TUnknown -> "Json"
 
 -- | Capabilities are the namespaces of the builtins/effects actually invoked
 -- | (`"db.insert@1"` / `"db.insert"` -> `"db"`), so a program declares exactly

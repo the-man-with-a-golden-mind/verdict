@@ -8,9 +8,12 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const casesDir = join(root, 'conformance', 'cases');
 const finvmCmd = process.env.FINVM_CMD;
+const oracleOnly =
+  process.env.ORACLE_ONLY === '1' || process.argv.includes('--oracle-only');
 
-if (!finvmCmd) {
+if (!finvmCmd && !oracleOnly) {
   console.error('Usage: FINVM_CMD="finvm run" node conformance/run.mjs');
+  console.error('       ORACLE_ONLY=1 node conformance/run.mjs');
   console.error('The runner appends the compiled program JSON path to FINVM_CMD.');
   process.exit(1);
 }
@@ -23,14 +26,29 @@ try {
     .filter((name) => name.endsWith('.verdict'))
     .sort();
 
-  console.log('case\tstatus\tfinvm result\toracle result');
+  console.log(
+    oracleOnly
+      ? 'case\tstatus\toracle result'
+      : 'case\tstatus\tfinvm result\toracle result'
+  );
 
   for (const name of cases) {
     const srcPath = join(casesDir, name);
-    const jsonPath = join(tmp, name.replace(/\.verdict$/, '.json'));
     const label = basename(name, '.verdict');
 
     try {
+      const oracle = runNode(['bin/verdictrun.mjs', srcPath]);
+      const oracleJson = parseLastJsonObject(oracle.stdout);
+      const oracleResult = oracleJson.result;
+
+      if (oracleOnly) {
+        const ok = oracleJson.status === 'completed';
+        if (!ok) failures += 1;
+        printOracleRow(label, ok ? 'PASS' : 'FAIL', oracleResult);
+        continue;
+      }
+
+      const jsonPath = join(tmp, name.replace(/\.verdict$/, '.json'));
       const compiled = runNode(['bin/verdictc.mjs', srcPath]);
       writeFileSync(jsonPath, compiled.stdout);
 
@@ -38,16 +56,16 @@ try {
       const finvmJson = parseLastJsonObject(finvm.stdout);
       const finvmResult = finvmJson.result;
 
-      const oracle = runNode(['bin/verdictrun.mjs', srcPath]);
-      const oracleJson = parseLastJsonObject(oracle.stdout);
-      const oracleResult = oracleJson.result;
-
       const ok = deepEqualJson(finvmResult, oracleResult);
       if (!ok) failures += 1;
       printRow(label, ok ? 'PASS' : 'FAIL', finvmResult, oracleResult);
     } catch (err) {
       failures += 1;
-      printRow(label, 'FAIL', String(err.message || err), null);
+      if (oracleOnly) {
+        printOracleRow(label, 'FAIL', String(err.message || err));
+      } else {
+        printRow(label, 'FAIL', String(err.message || err), null);
+      }
     }
   }
 } finally {
@@ -91,6 +109,10 @@ function printRow(label, status, finvmResult, oracleResult) {
     compact(finvmResult),
     compact(oracleResult)
   ].join('\t'));
+}
+
+function printOracleRow(label, status, oracleResult) {
+  console.log([label, status, compact(oracleResult)].join('\t'));
 }
 
 function compact(value) {

@@ -17,7 +17,7 @@ import Data.Map as Map
 import Data.Maybe (Maybe(..))
 import Data.Set (Set)
 import Data.Set as Set
-import Verdict.Syntax.AST (Exposing(..), Module(..), Name, ParsedModule, TypeDecl(..), declName, moduleDecls, moduleName, moduleTypes)
+import Verdict.Syntax.AST (Exposing(..), Module(..), Name, ParsedModule, TypeDecl(..), declName, inputName, moduleDecls, moduleInputs, moduleName, moduleTypes)
 
 resolveProject :: Map Name ParsedModule -> Name -> Either String Module
 resolveProject mods entry = do
@@ -27,10 +27,12 @@ resolveProject mods entry = do
   traverse_ checkModuleImports reachMods
   let allDecls = Array.concatMap (moduleDecls <<< _.mod) reachMods
   let allTypes = Array.concatMap (moduleTypes <<< _.mod) reachMods
+  let allInputs = Array.concatMap (moduleInputs <<< _.mod) reachMods
   checkUnique "definition" (map declName allDecls)
+  checkUnique "input" (map inputName allInputs)
   checkUnique "constructor" (Array.concatMap ctorNames allTypes)
   checkUnique "type" (map typeName allTypes)
-  pure (Module entry allTypes allDecls)
+  pure (Module entry allTypes allInputs allDecls)
   where
   requireModule n = case Map.lookup n mods of
     Just pm -> Right pm

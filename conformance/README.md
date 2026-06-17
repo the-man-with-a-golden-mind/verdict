@@ -25,14 +25,20 @@ and deep-compares the tagless result JSON.
   `parseInt`).
 - `str_text.verdict`: `str.*` string results (`toUpper`, `replace`, `strConcat`,
   `trim`) — probes `VString` encoding parity.
-- `str_split.verdict`: `split` returning a `List String` — probes list-of-strings
-  encoding parity.
+- `inputs.verdict`: typed `input` declarations fulfilled via `input.get@1` and a
+  sidecar `inputs.inputs.json` runtime value map.
 
 ## Running
 
 ```sh
 npm run build
 FINVM_CMD="finvm run" node conformance/run.mjs
+```
+
+Reference-VM only (no FinVM host required):
+
+```sh
+npm run test:conformance:oracle
 ```
 
 `FINVM_CMD` is invoked with the compiled program JSON path appended. The real

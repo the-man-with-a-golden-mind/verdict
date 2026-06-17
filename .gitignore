@@ -1,0 +1,15 @@
+/bower_components/
+/node_modules/
+/.pulp-cache/
+/output/
+/generated-docs/
+/.psc-package/
+/.psc*
+/.purs*
+/.psa*
+/.spago
+/package-lock.json
+
+# Generated browser bundles (produced by `npm run bundle`)
+/web/verdict.mjs
+/web/verdict.global.js
